@@ -6,9 +6,13 @@ passthrough = [
     "TDLIB_LINK_SSL_STATIC",
     "OPENSSL_STATIC",
     "RUSTFLAGS",
+    # TDLib CMake needs musl OpenSSL/zlib; host apt packages are glibc and are not usable here.
+    "OPENSSL_ROOT_DIR=/musl-local",
+    "PKG_CONFIG_PATH=/musl-local/lib/pkgconfig",
 ]
 
 [target.x86_64-unknown-linux-musl]
 pre-build = [
-    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gperf",
+    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gperf perl make ca-certificates curl cmake",
+    "bash scripts/cross-prebuild-musl.sh",
 ]

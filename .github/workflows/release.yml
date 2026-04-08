@@ -80,7 +80,7 @@ jobs:
           NAME="tg-proxy-check-${VERSION}-${{ matrix.suffix }}"
           scripts/package-release-artifact.sh dist "$NAME" target/release/tg-proxy-check
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: artifact-${{ matrix.suffix }}
           path: |
@@ -175,7 +175,7 @@ jobs:
             scripts/package-release-artifact.sh dist "$NAME" "$BIN" "$TDJSON"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: artifact-${{ matrix.suffix }}
           path: |
@@ -189,7 +189,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: artifact-*
           path: dist

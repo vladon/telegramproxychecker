@@ -45,84 +45,41 @@ jobs:
           fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
-  build-gnu:
-    name: GNU (${{ matrix.suffix }})
+  # Single matrix + fail-fast: first failure (GNU or musl) cancels every other leg.
+  build:
+    name: Build (${{ matrix.suffix }})
     needs: validate-tag
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
-          - suffix: linux-x86_64-gnu
+          - libc: gnu
+            suffix: linux-x86_64-gnu
             tdlib_variant: gha-gnu
             rustflags: ""
-          - suffix: linux-x86_64-gnu-v3
+          - libc: gnu
+            suffix: linux-x86_64-gnu-v3
             tdlib_variant: gha-gnu-v3
             rustflags: "-C target-cpu=x86-64-v3"
-    env:
-      CARGO_TERM_COLOR: always
-      RUST_BACKTRACE: "1"
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
-            libssl-dev zlib1g-dev libzstd-dev gperf
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: cargo build --release
-        env:
-          TDLIB_BUILD_VARIANT: ${{ matrix.tdlib_variant }}
-          RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo build --release
-
-      - name: Package
-        env:
-          VERSION: ${{ needs.validate-tag.outputs.version }}
-        run: |
-          chmod +x scripts/package-release-artifact.sh
-          NAME="tg-proxy-check-${VERSION}-${{ matrix.suffix }}"
-          scripts/package-release-artifact.sh dist "$NAME" target/release/tg-proxy-check
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: artifact-${{ matrix.suffix }}
-          path: |
-            dist/*.tar.gz
-            dist/*.sha256
-
-  build-musl:
-    name: musl (${{ matrix.suffix }})
-    needs: validate-tag
-    runs-on: ubuntu-22.04
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suffix: linux-x86_64-musl
+          - libc: musl
+            suffix: linux-x86_64-musl
             tdlib_variant: gha-musl
             rustflags: ""
             static: false
-          - suffix: linux-x86_64-musl-v3
+          - libc: musl
+            suffix: linux-x86_64-musl-v3
             tdlib_variant: gha-musl-v3
             rustflags: "-C target-cpu=x86-64-v3"
             static: false
-          - suffix: linux-x86_64-musl-static
+          - libc: musl
+            suffix: linux-x86_64-musl-static
             tdlib_variant: gha-musl-static
             rustflags: "-C target-feature=+crt-static"
             static: true
-          - suffix: linux-x86_64-musl-v3-static
+          - libc: musl
+            suffix: linux-x86_64-musl-v3-static
             tdlib_variant: gha-musl-v3-static
             rustflags: "-C target-feature=+crt-static -C target-cpu=x86-64-v3"
             static: true
@@ -139,22 +96,36 @@ jobs:
       - name: Free disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
 
-      - name: Install host tools (patchelf for shared musl bundles)
+      - name: Install dependencies (GNU)
+        if: matrix.libc == 'gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+            libssl-dev zlib1g-dev libzstd-dev gperf
+
+      - name: Install host tools (musl)
+        if: matrix.libc == 'musl'
         run: |
           sudo apt-get update
           sudo apt-get install -y patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.libc == 'gnu'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.libc == 'musl'
         with:
           toolchain: 1.94.1
           targets: x86_64-unknown-linux-musl
 
       - name: Install cross
+        if: matrix.libc == 'musl'
         uses: taiki-e/install-action@v2
         with:
           tool: cross
 
       - name: Verify Cross.toml musl setup (dockerfile, not pre-build array)
+        if: matrix.libc == 'musl'
         run: |
           if grep -qE '^\s*pre-build\s*=' Cross.toml; then
             echo "::error::Cross.toml must not use a pre-build array for musl (repo scripts are not in that image layer). Use docker/cross-musl.Dockerfile only."
@@ -164,7 +135,15 @@ jobs:
           test -f scripts/cross-prebuild-musl.sh
           grep -q 'docker/cross-musl.Dockerfile' Cross.toml
 
+      - name: cargo build --release (GNU)
+        if: matrix.libc == 'gnu'
+        env:
+          TDLIB_BUILD_VARIANT: ${{ matrix.tdlib_variant }}
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release
+
       - name: cargo build --release (cross musl)
+        if: matrix.libc == 'musl'
         env:
           TDLIB_BUILD_VARIANT: ${{ matrix.tdlib_variant }}
           RUSTFLAGS: ${{ matrix.rustflags }}
@@ -176,6 +155,7 @@ jobs:
           cross build --release --target x86_64-unknown-linux-musl
 
       - name: Patchelf (shared tdjson) / verify static
+        if: matrix.libc == 'musl'
         run: |
           chmod +x scripts/find-libtdjson.sh scripts/package-release-artifact.sh scripts/verify-fully-static.sh
           BIN="$MUSL_TARGET_DIR/tg-proxy-check"
@@ -186,10 +166,21 @@ jobs:
             patchelf --set-rpath '$ORIGIN' "$BIN"
           fi
 
-      - name: Package
+      - name: Package (GNU)
+        if: matrix.libc == 'gnu'
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
         run: |
+          chmod +x scripts/package-release-artifact.sh
+          NAME="tg-proxy-check-${VERSION}-${{ matrix.suffix }}"
+          scripts/package-release-artifact.sh dist "$NAME" target/release/tg-proxy-check
+
+      - name: Package (musl)
+        if: matrix.libc == 'musl'
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          chmod +x scripts/package-release-artifact.sh
           NAME="tg-proxy-check-${VERSION}-${{ matrix.suffix }}"
           BIN="$MUSL_TARGET_DIR/tg-proxy-check"
           if [ "${{ matrix.static }}" = "true" ]; then
@@ -209,7 +200,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     if: github.ref_type == 'tag'
-    needs: [validate-tag, build-gnu, build-musl]
+    needs: [validate-tag, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

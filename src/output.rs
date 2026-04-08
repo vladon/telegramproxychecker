@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Sponsored-channel info from TDLib `getPromoData` (JSON always includes this object).
+/// Sponsored-channel info from TDLib `chatSourceMtprotoProxy` chat positions (JSON always includes this object).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SponsoredStatus {

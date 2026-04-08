@@ -551,7 +551,8 @@ fn note_auth_from_value(v: &Value, auth: &mut Option<String>) {
     }
 }
 
-/// MTProto + `--auth-session`: wait for `authorizationStateReady`, then `getPromoData` (TDLib JSON name).
+/// MTProto + `--auth-session`: wait for `authorizationStateReady`, then detect MTProto proxy sponsor
+/// via TDLib `chatSourceMtprotoProxy` in chat positions (`loadChats` → `getChats` → `getChat`).
 fn promo_and_subscription_after_ping(
     client_id: i32,
     deadline: Instant,
@@ -571,7 +572,7 @@ fn promo_and_subscription_after_ping(
             SubscriptionReport::unchecked(),
         );
     }
-    run_get_promo_flow(client_id, deadline)
+    run_mtproto_sponsor_flow(client_id, deadline)
 }
 
 fn wait_for_authorization_ready(
@@ -625,26 +626,118 @@ fn wait_for_authorization_ready(
     auth.as_deref() == Some("authorizationStateReady")
 }
 
-fn run_get_promo_flow(client_id: i32, deadline: Instant) -> (SponsoredReport, SubscriptionReport) {
-    let extra = next_extra("getPromoData");
-    let req = match serde_json::to_string(&json!({
-        "@type": "getPromoData",
-        "@extra": &extra,
+const SPONSOR_SCAN_GET_CHAT_MAX: usize = 200;
+
+fn run_mtproto_sponsor_flow(client_id: i32, deadline: Instant) -> (SponsoredReport, SubscriptionReport) {
+    let checked = SubscriptionReport::checked_no_join_info();
+    let load_extra = next_extra("loadChats");
+    let load_req = match serde_json::to_string(&json!({
+        "@type": "loadChats",
+        "chat_list": { "@type": "chatListMain" },
+        "limit": 100,
+        "@extra": &load_extra,
     })) {
         Ok(s) => s,
-        Err(_) => {
-            return (
-                SponsoredReport::unknown_unchecked(),
-                SubscriptionReport::checked_no_join_info(),
-            );
-        }
+        Err(_) => return (SponsoredReport::unknown_unchecked(), checked),
     };
-    if send_raw(client_id, &req).is_err() {
-        return (
-            SponsoredReport::unknown_unchecked(),
-            SubscriptionReport::checked_no_join_info(),
-        );
+    if send_raw(client_id, &load_req).is_err() {
+        return (SponsoredReport::unknown_unchecked(), checked);
     }
+    if !wait_rpc_ok(client_id, deadline, &load_extra) {
+        return (SponsoredReport::unknown_unchecked(), checked);
+    }
+
+    let list_extra = next_extra("getChats");
+    let list_req = match serde_json::to_string(&json!({
+        "@type": "getChats",
+        "chat_list": { "@type": "chatListMain" },
+        "limit": 500,
+        "@extra": &list_extra,
+    })) {
+        Ok(s) => s,
+        Err(_) => return (SponsoredReport::unknown_unchecked(), checked),
+    };
+    if send_raw(client_id, &list_req).is_err() {
+        return (SponsoredReport::unknown_unchecked(), checked);
+    }
+
+    let Some(chat_ids) = wait_chats_ids(client_id, deadline, &list_extra) else {
+        return (SponsoredReport::unknown_unchecked(), checked);
+    };
+
+    if chat_ids.is_empty() {
+        return (SponsoredReport::no_promo(), checked);
+    }
+
+    let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for cid in chat_ids.iter().take(SPONSOR_SCAN_GET_CHAT_MAX) {
+        let ex = next_extra("getChat");
+        let req = match serde_json::to_string(&json!({
+            "@type": "getChat",
+            "chat_id": cid,
+            "@extra": &ex,
+        })) {
+            Ok(s) => s,
+            Err(_) => return (SponsoredReport::unknown_unchecked(), checked),
+        };
+        if send_raw(client_id, &req).is_err() {
+            return (SponsoredReport::unknown_unchecked(), checked);
+        }
+        pending.insert(ex);
+    }
+
+    let mut found: Option<(i64, i64)> = None;
+    while Instant::now() < deadline && !pending.is_empty() && found.is_none() {
+        let Some(line) = receive_json_until(deadline, Duration::from_millis(500)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if !client_matches(&v, client_id) {
+            continue;
+        }
+        let ex = extra_for_match(&v).unwrap_or_default();
+        if json_type_name(&v) == Some("error") && pending.contains(&ex) {
+            return (SponsoredReport::unknown_unchecked(), checked);
+        }
+        if json_type_name(&v) == Some("chat") && pending.remove(&ex) {
+            if chat_positions_have_mtproto_proxy_source(&v) {
+                if let Some(pair) = sponsored_chat_ids_from_tdlib_chat(&v) {
+                    found = Some(pair);
+                }
+            }
+        }
+        if found.is_none() {
+            if let Some((disp, tid)) = sponsor_from_update_payload(&v) {
+                found = Some((disp, tid));
+                break;
+            }
+        }
+    }
+
+    let Some((display_id, tdlib_chat_id)) = found else {
+        if !pending.is_empty() {
+            return (SponsoredReport::unknown_unchecked(), checked);
+        }
+        return (SponsoredReport::no_promo(), checked);
+    };
+
+    let sponsored = SponsoredReport::yes_with_peer_id(display_id);
+    let Some(user_id) = fetch_my_user_id(client_id, deadline) else {
+        return (sponsored, checked);
+    };
+    let joined = fetch_am_i_member(client_id, deadline, tdlib_chat_id, user_id);
+    (
+        sponsored,
+        SubscriptionReport {
+            checked: true,
+            joined,
+        },
+    )
+}
+
+fn wait_rpc_ok(client_id: i32, deadline: Instant, want_extra: &str) -> bool {
     while Instant::now() < deadline {
         let Some(line) = receive_json_until(deadline, Duration::from_millis(500)) else {
             continue;
@@ -655,92 +748,93 @@ fn run_get_promo_flow(client_id: i32, deadline: Instant) -> (SponsoredReport, Su
         if !client_matches(&v, client_id) {
             continue;
         }
-        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(extra.as_str())
-        {
-            return (
-                SponsoredReport::unknown_unchecked(),
-                SubscriptionReport::checked_no_join_info(),
-            );
+        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(want_extra) {
+            return false;
         }
-        if extra_for_match(&v).as_deref() == Some(extra.as_str()) {
-            return parse_get_promo_response(&v, client_id, deadline);
+        if json_type_name(&v) == Some("ok") && extra_for_match(&v).as_deref() == Some(want_extra) {
+            return true;
         }
     }
-    (
-        SponsoredReport::unknown_unchecked(),
-        SubscriptionReport::checked_no_join_info(),
-    )
+    false
 }
 
-fn parse_get_promo_response(
-    v: &Value,
-    client_id: i32,
-    deadline: Instant,
-) -> (SponsoredReport, SubscriptionReport) {
-    match v.get("@type").and_then(|t| t.as_str()) {
-        Some("promoDataEmpty") => (
-            SponsoredReport::no_promo(),
-            SubscriptionReport::checked_no_join_info(),
-        ),
-        Some("promoData") => {
-            let Some(peer) = v.get("peer").filter(|p| !p.is_null()) else {
-                return (
-                    SponsoredReport::unknown_unchecked(),
-                    SubscriptionReport::checked_no_join_info(),
-                );
-            };
-            let Some(display_id) = peer_display_id(peer) else {
-                return (
-                    SponsoredReport::unknown_unchecked(),
-                    SubscriptionReport::checked_no_join_info(),
-                );
-            };
-            let sponsored = SponsoredReport::yes_with_peer_id(display_id);
-            let Some(chat_id) = tdlib_chat_id_for_peer(peer) else {
-                return (
-                    sponsored,
-                    SubscriptionReport::checked_no_join_info(),
-                );
-            };
-            let Some(user_id) = fetch_my_user_id(client_id, deadline) else {
-                return (
-                    sponsored,
-                    SubscriptionReport::checked_no_join_info(),
-                );
-            };
-            let joined = fetch_am_i_member(client_id, deadline, chat_id, user_id);
-            let sub = SubscriptionReport {
-                checked: true,
-                joined,
-            };
-            (sponsored, sub)
+fn wait_chats_ids(client_id: i32, deadline: Instant, want_extra: &str) -> Option<Vec<i64>> {
+    while Instant::now() < deadline {
+        let Some(line) = receive_json_until(deadline, Duration::from_millis(500)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if !client_matches(&v, client_id) {
+            continue;
         }
-        _ => (
-            SponsoredReport::unknown_unchecked(),
-            SubscriptionReport::checked_no_join_info(),
-        ),
-    }
-}
-
-fn peer_display_id(peer: &Value) -> Option<i64> {
-    let t = peer.get("@type")?.as_str()?;
-    match t {
-        "peerChannel" => peer.get("channel_id").and_then(|x| x.as_i64()),
-        "peerChat" => peer.get("chat_id").and_then(|x| x.as_i64()),
-        "peerUser" => peer.get("user_id").and_then(|x| x.as_i64()),
-        _ => None,
-    }
-}
-
-fn tdlib_chat_id_for_peer(peer: &Value) -> Option<i64> {
-    let t = peer.get("@type")?.as_str()?;
-    match t {
-        "peerChannel" => {
-            let cid = peer.get("channel_id").and_then(|x| x.as_i64())?;
-            Some(-(1_000_000_000_000_i64 + cid))
+        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(want_extra) {
+            return None;
         }
-        "peerChat" => peer.get("chat_id").and_then(|x| x.as_i64()),
-        "peerUser" => peer.get("user_id").and_then(|x| x.as_i64()),
+        if json_type_name(&v) == Some("chats") && extra_for_match(&v).as_deref() == Some(want_extra) {
+            return Some(parse_chat_id_list(v.get("chat_ids")?));
+        }
+    }
+    None
+}
+
+fn parse_chat_id_list(v: &Value) -> Vec<i64> {
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    arr.iter().filter_map(json_i64).collect()
+}
+
+fn json_i64(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
+}
+
+fn chat_positions_have_mtproto_proxy_source(chat: &Value) -> bool {
+    chat.get("positions")
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .any(position_is_mtproto_proxy_source)
+}
+
+fn position_is_mtproto_proxy_source(pos: &Value) -> bool {
+    pos.pointer("/source/@type")
+        .and_then(|t| t.as_str())
+        .is_some_and(|s| s == "chatSourceMtprotoProxy")
+}
+
+/// TDLib `chat.type` supergroup_id for channels, and `chat.id` for getChatMember.
+fn sponsored_chat_ids_from_tdlib_chat(chat: &Value) -> Option<(i64, i64)> {
+    let tdlib_chat_id = json_i64(chat.get("id")?)?;
+    let t = chat.pointer("/type/@type")?.as_str()?;
+    if t != "chatTypeSupergroup" {
+        return None;
+    }
+    let is_channel = chat.pointer("/type/is_channel")?.as_bool()?;
+    if !is_channel {
+        return None;
+    }
+    let supergroup_id = json_i64(chat.pointer("/type/supergroup_id")?)?;
+    Some((supergroup_id, tdlib_chat_id))
+}
+
+fn sponsor_from_update_payload(v: &Value) -> Option<(i64, i64)> {
+    match json_type_name(v)? {
+        "updateNewChat" => {
+            let chat = v.get("chat")?;
+            if !chat_positions_have_mtproto_proxy_source(chat) {
+                return None;
+            }
+            sponsored_chat_ids_from_tdlib_chat(chat)
+        }
+        "updateChat" => {
+            let chat = v.get("chat")?;
+            if !chat_positions_have_mtproto_proxy_source(chat) {
+                return None;
+            }
+            sponsored_chat_ids_from_tdlib_chat(chat)
+        }
         _ => None,
     }
 }

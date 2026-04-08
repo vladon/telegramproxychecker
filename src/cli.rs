@@ -42,7 +42,7 @@ pub struct Cli {
     pub api_hash: Option<String>,
 
     /// TDLib `database_directory` for a persistent session (created if missing; files under `<DIR>/tg-proxy-check-files/`).
-    /// When set, TDLib runs the full login flow on stdin when needed, then `getPromoData` may run after `authorizationStateReady`.
+    /// When set, TDLib runs the full login flow on stdin when needed; after `pingProxy`, sponsor detection scans main chat list positions.
     #[arg(long, value_name = "DIR")]
     pub auth_session: Option<PathBuf>,
 }

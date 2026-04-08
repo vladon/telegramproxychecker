@@ -50,6 +50,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TDLIB");
     println!("cargo:rerun-if-env-changed=OPENSSL_ROOT_DIR");
+    println!("cargo:rerun-if-env-changed=ZLIB_ROOT");
     println!("cargo:rerun-if-env-changed=TDLIB_LINK_SHARED");
     println!("cargo:rerun-if-env-changed=TDLIB_LINK_SSL_STATIC");
     println!("cargo:rerun-if-env-changed=TDLIB_BUILD_VARIANT");
@@ -86,7 +87,7 @@ fn main() {
     let variant_raw = env::var("TDLIB_BUILD_VARIANT").unwrap_or_else(|_| "default".into());
     let v = variant_raw.to_ascii_lowercase();
     let musl_static_tdlib =
-        target_env == "musl" && (v.contains("musl-static") || v.contains("musl-v3-static"));
+        is_musl_target && (v.contains("musl-static") || v.contains("musl-v3-static"));
 
     let mut cfg = Config::new(&td_src);
     cfg.out_dir(artifact_root.join("tdlib-cmake"))
@@ -113,8 +114,12 @@ fn main() {
             // Do not `is_file()`/`is_dir()` gate these: the build script may run on the GitHub host
             // where /musl-local is absent, while CMake runs in the cross container where it exists.
             if is_musl_target {
-                cfg.define("ZLIB_ROOT", root.as_str());
-                let prefix = PathBuf::from(&root);
+                let zlib_prefix = env::var("ZLIB_ROOT")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| root.clone());
+                cfg.define("ZLIB_ROOT", zlib_prefix.as_str());
+                let prefix = PathBuf::from(&zlib_prefix);
                 let zlib_inc = prefix.join("include");
                 let zlib_lib = prefix.join("lib").join("libz.a");
                 let zlib_lib64 = prefix.join("lib64").join("libz.a");
@@ -152,7 +157,7 @@ fn main() {
 
     let force_shared = env::var("TDLIB_LINK_SHARED").as_deref() == Ok("1");
     let use_shared =
-        target_os == "windows" || force_shared || (target_env == "musl" && !musl_static_tdlib);
+        target_os == "windows" || force_shared || (is_musl_target && !musl_static_tdlib);
 
     if use_shared {
         link_local_shared(&lib_dir, &target_os);

@@ -8,6 +8,7 @@ passthrough = [
     "RUSTFLAGS",
     # TDLib CMake needs musl OpenSSL/zlib; host apt packages are glibc and are not usable here.
     "OPENSSL_ROOT_DIR=/musl-local",
+    "ZLIB_ROOT=/musl-local",
     "PKG_CONFIG_PATH=/musl-local/lib/pkgconfig",
 ]
 

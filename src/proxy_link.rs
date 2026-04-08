@@ -8,6 +8,25 @@ use std::collections::HashMap;
 use thiserror::Error;
 use url::Url;
 
+/// Upper bounds for query-derived strings (defensive; normal Telegram links are far smaller).
+const MAX_SERVER_LEN: usize = 512;
+const MAX_MTSECRET_LEN: usize = 8192;
+const MAX_SOCKS_CRED_LEN: usize = 2048;
+const MAX_PORT_QUERY_BYTES: usize = 16;
+
+fn field_too_long(field: &'static str, max: usize) -> ParseError {
+    ParseError::InvalidUrl(format!("{field} exceeds maximum length ({max} bytes)"))
+}
+
+fn reject_control_chars(s: &str, field: &'static str) -> Result<(), ParseError> {
+    if s.chars().any(|c| c.is_control()) {
+        return Err(ParseError::InvalidUrl(format!(
+            "{field} contains control characters"
+        )));
+    }
+    Ok(())
+}
+
 /// Kind of proxy encoded in the link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProxyKind {
@@ -72,10 +91,18 @@ pub fn parse_proxy_link(input: &str) -> Result<ProxyConfig, ParseError> {
         None | Some("") => return Err(ParseError::MissingPort),
         Some(s) => s,
     };
+    if port_str.len() > MAX_PORT_QUERY_BYTES {
+        return Err(ParseError::InvalidPort);
+    }
     let port: u16 = port_str.parse().map_err(|_| ParseError::InvalidPort)?;
     if port == 0 {
         return Err(ParseError::InvalidPort);
     }
+
+    if server.len() > MAX_SERVER_LEN {
+        return Err(field_too_long("server", MAX_SERVER_LEN));
+    }
+    reject_control_chars(&server, "server")?;
 
     let mtproto_secret = match kind {
         ProxyKind::Mtproto => {
@@ -84,6 +111,10 @@ pub fn parse_proxy_link(input: &str) -> Result<ProxyConfig, ParseError> {
                 .cloned()
                 .filter(|s| !s.is_empty())
                 .ok_or(ParseError::MissingMtprotoSecret)?;
+            if secret.len() > MAX_MTSECRET_LEN {
+                return Err(field_too_long("secret", MAX_MTSECRET_LEN));
+            }
+            reject_control_chars(&secret, "secret")?;
             Some(secret)
         }
         ProxyKind::Socks5 => None,
@@ -98,6 +129,19 @@ pub fn parse_proxy_link(input: &str) -> Result<ProxyConfig, ParseError> {
         ProxyKind::Socks5 => pairs.get("pass").cloned().filter(|s| !s.is_empty()),
         ProxyKind::Mtproto => None,
     };
+
+    if let Some(ref u) = socks_username {
+        if u.len() > MAX_SOCKS_CRED_LEN {
+            return Err(field_too_long("user", MAX_SOCKS_CRED_LEN));
+        }
+        reject_control_chars(u, "user")?;
+    }
+    if let Some(ref p) = socks_password {
+        if p.len() > MAX_SOCKS_CRED_LEN {
+            return Err(field_too_long("pass", MAX_SOCKS_CRED_LEN));
+        }
+        reject_control_chars(p, "pass")?;
+    }
 
     Ok(ProxyConfig {
         original_input,
@@ -167,7 +211,8 @@ pub fn redact_sensitive_query_in_link(input: &str) -> String {
         |mut ser, (k, v)| {
             let redact = k.eq_ignore_ascii_case("secret")
                 || k.eq_ignore_ascii_case("pass")
-                || k.eq_ignore_ascii_case("password");
+                || k.eq_ignore_ascii_case("password")
+                || k.eq_ignore_ascii_case("token");
             let v_out = if redact { "<redacted>" } else { v.as_ref() };
             ser.append_pair(k.as_ref(), v_out);
             ser

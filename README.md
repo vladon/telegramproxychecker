@@ -24,7 +24,7 @@ The same forms work with host `telegram.me` instead of `t.me`.
 - `tg://socks?server=HOST&port=PORT&user=USER&pass=PASS`
 - `https://t.me/socks?...` and `http://t.me/socks?...` (with optional `user` / `pass`)
 
-Query parameters are URL-decoded. For `--verbose` text output, `input_link=` shows a **redacted** copy of the URL (`secret` and `pass` query values replaced) so MTProto secrets and SOCKS passwords are not written to the terminal. The in-memory parsed configuration still holds the real values for TDLib only.
+Query parameters are URL-decoded. For `--verbose` text output, `input_link=` shows a **redacted** copy of the URL (`secret`, `pass`, `password`, and `token` query values replaced) so MTProto secrets and SOCKS passwords are not written to the terminal. The in-memory parsed configuration still holds the real values for TDLib only.
 
 ## Usage
 
@@ -93,7 +93,7 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 
 ### Verbose TDLib logs
 
-With `--verbose`, internal TDLib log lines are printed. Lines that appear to mention `password`, `secret`, `api_hash`, or `proxytype` are replaced with a placeholder to reduce accidental credential leakage; this is heuristic and not a cryptographic guarantee.
+With `--verbose`, internal TDLib log lines are printed. Lines that appear to mention `password`, `secret`, `api_hash`, `proxytype`, or `token` are replaced with a placeholder to reduce accidental credential leakage; this is heuristic and not a cryptographic guarantee.
 
 This project links the **shared TDLib JSON client** library:
 
@@ -156,6 +156,50 @@ cargo test --no-default-features
 
 The default `tdlib` Cargo feature links TDLib; disabling default features skips linking and `probe_proxy` returns a clear “built without tdlib” initialization error.
 
+## Troubleshooting
+
+### Probe times out (exit code 3)
+
+- Increase `--timeout` if the proxy or route is slow; `pingProxy` measures a full path through the proxy to Telegram, not a local TCP connect.
+- Run with `--verbose` and inspect `authorization_states_seen` and `wall_duration_ms` to see how far TDLib got before the deadline.
+- Firewall or TLS interception on the proxy can stall the handshake indefinitely within your timeout.
+
+### Invalid link or CLI (exit code 2)
+
+- Pass exactly one of the positional link or `--proxy-link` (not both).
+- `TG_API_ID` / `TG_API_HASH` must be set (or passed via flags) and `api_id` must be a positive integer.
+- `--timeout` must be greater than zero.
+
+### TDLib initialization failure (exit code 4)
+
+- Confirm the binary was built **with** the default `tdlib` feature and that `td_create_client_id` succeeds (see verbose output / TDLib logs if enabled).
+- Wrong or mismatched `api_id` / `api_hash` pairs often surface as TDLib errors during startup, not as parser errors.
+
+### Internal / unexpected (exit code 5)
+
+- Rare: JSON or filesystem issues during the probe. `--verbose` may include `utf8_line_bytes=` in internal errors if `td_receive` returned non-JSON (diagnostic only; the line body is not printed).
+
+### TDLib linking and runtime failures
+
+**Link step: “cannot find `-ltdjson`” / unresolved `td_create_client_id`**
+
+- Set `TDLIB_LIB_DIR` to the directory containing the import library / `.so` / `.dylib`, then rebuild.
+- On some MinGW setups you may also need `RUSTFLAGS=-L/path/to/lib` so the linker sees the library.
+
+**Run time: error loading shared library / `libtdjson.so` not found**
+
+- Linux: add the directory containing `libtdjson.so` to `LD_LIBRARY_PATH`, or install the library into a path the dynamic loader already searches (e.g. `/usr/lib`).
+- macOS: ensure the dylib is on the loader path (`DYLD_LIBRARY_PATH` for local builds; SIP may limit this for some binaries). You may need `install_name_tool` or an `@rpath` on custom builds.
+- Windows: place `tdjson.dll` next to `tg-proxy-check.exe` or on `PATH`.
+
+**Wrong TDLib ABI / version**
+
+- The crate expects the multiplexed JSON API (`td_create_client_id`, `td_send`, `td_receive`). Very old installs that only ship `td_json_client_*` need a different FFI layer; mismatched headers vs binary often crash or return garbage—rebuild TDLib and this tool against the same version.
+
+**Build without TDLib for parser-only workflows**
+
+- Use `cargo build --no-default-features` or `cargo test --no-default-features` when you only need link parsing and do not have `libtdjson` installed.
+
 ## Development
 
 ```bash
@@ -167,7 +211,7 @@ cargo clippy --no-default-features -- -D warnings
 
 ## Design note (FFI)
 
-- **Approach:** Direct **tdjson FFI** in `src/tdlib_live.rs` (behind the `tdlib` feature), with `build.rs` making link flags explicit. This avoids immature generated bindings while keeping full control over `@extra` correlation and the authorization-state sequence.
+- **Approach:** Low-level **tdjson** calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles the `pingProxy` / authorization flow, with `build.rs` making link flags explicit. This avoids immature generated bindings while keeping full control over `@extra` correlation and the authorization-state sequence.
 - **Why not a Rust TDLib crate:** Few crates track upstream closely; raw FFI + `serde_json` is simpler to keep buildable and debuggable.
 - **Assumptions:** A compatible `tdjson` shared library is installed; JSON field names match your TDLib version (snake_case keys as in upstream TL).
 - **Caveats:** All `td_receive` calls used here run on **one thread**; the pointer returned by `td_receive` is only valid until the next `td_receive` / `td_execute` on that thread—this implementation copies the string immediately. Temporary TDLib database directories are created under the system temp folder per run. Every exit path after `td_create_client_id` runs `close` and clears the log callback so the next probe in-process does not inherit state. Timeouts carry a `ProbeTimeoutContext` so verbose output still shows elapsed time and authorization states reached.

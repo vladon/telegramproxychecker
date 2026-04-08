@@ -27,6 +27,10 @@ pub struct TdlibProbeSettings {
 }
 
 #[cfg(feature = "tdlib")]
+#[path = "tdjson_sys.rs"]
+mod tdjson_sys;
+
+#[cfg(feature = "tdlib")]
 #[path = "tdlib_live.rs"]
 mod tdlib_live;
 

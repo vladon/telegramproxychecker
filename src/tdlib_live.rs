@@ -4,12 +4,13 @@
 //! after a successful `checkDatabaseEncryptionKey` response (`ok`) so encrypted databases still
 //! reach a ping-capable state without a phone login.
 
+use super::tdjson_sys;
 use super::{TdlibCredentials, TdlibProbeSettings};
 use crate::error::{ProbeError, ProbeTimeoutContext};
 use crate::output::{success_interpretation, wall_ms, Interpretation, ProbeReport};
 use crate::proxy_link::{ProxyConfig, ProxyKind};
 use serde_json::{json, Value};
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -42,28 +43,42 @@ extern "C" fn td_log_cb(verbosity: libc::c_int, message: *const libc::c_char) {
     }
 }
 
-extern "C" {
-    fn td_create_client_id() -> libc::c_int;
-    fn td_send(client_id: libc::c_int, request: *const libc::c_char);
-    fn td_receive(timeout: libc::c_double) -> *const libc::c_char;
-    fn td_set_log_message_callback(
-        max_verbosity_level: libc::c_int,
-        callback: Option<extern "C" fn(libc::c_int, *const libc::c_char)>,
-    );
+/// Respects `deadline`: returns `None` when already past, otherwise blocks up to `min(remaining, max_slice)` (≥1 ms).
+fn receive_json_until(deadline: Instant, max_slice: Duration) -> Option<String> {
+    let now = Instant::now();
+    if now >= deadline {
+        return None;
+    }
+    let remaining = deadline.saturating_duration_since(now);
+    let slice = remaining.min(max_slice).max(Duration::from_millis(1));
+    tdjson_sys::receive_line(slice)
 }
 
-fn receive_json(timeout: Duration) -> Option<String> {
-    // Cap upper bound: td_receive expects seconds as double; absurd values are unnecessary.
-    let secs = timeout.as_secs_f64().clamp(0.0, 86400.0);
-    unsafe {
-        let ptr = td_receive(secs);
-        if ptr.is_null() {
-            return None;
-        }
-        // TDLib guarantees a valid UTF-8 JSON line; invalid UTF-8 is treated as empty update.
-        let s = CStr::from_ptr(ptr).to_str().ok()?.to_string();
-        Some(s)
+fn json_type_name(v: &Value) -> Option<&str> {
+    match v.get("@type")? {
+        Value::String(s) => Some(s.as_str()),
+        _ => None,
     }
+}
+
+fn parse_tdlib_seconds(v: &Value) -> Option<f64> {
+    let sec = v.get("seconds")?;
+    match sec {
+        Value::Number(n) => n
+            .as_f64()
+            .or_else(|| n.as_i64().map(|i| i as f64))
+            .or_else(|| n.as_u64().map(|u| u as f64)),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn tdlib_error_message(v: &Value) -> String {
+    v.pointer("/message")
+        .and_then(|m| m.as_str())
+        .or_else(|| v.get("message").and_then(|m| m.as_str()))
+        .unwrap_or("unknown TDLib error")
+        .to_string()
 }
 
 /// Normalize `@extra` for comparisons (TDLib normally uses a string; be defensive).
@@ -77,15 +92,10 @@ fn extra_for_match(v: &Value) -> Option<String> {
     })
 }
 
-/// Sends a JSON request. TDLib copies the buffer before `td_send` returns; the `CString` only
-/// needs to stay alive for the duration of this call (see upstream `td_send` contract).
 fn send_raw(client_id: i32, json: &str) -> Result<(), ProbeError> {
-    let c = CString::new(json.as_bytes())
-        .map_err(|e| ProbeError::Internal(format!("request contains interior nul: {e}")))?;
-    unsafe {
-        td_send(client_id, c.as_ptr());
-    }
-    Ok(())
+    tdjson_sys::send_json(client_id, json).map_err(|e| {
+        ProbeError::Internal(format!("request contains interior nul: {e}"))
+    })
 }
 
 
@@ -119,9 +129,7 @@ struct LogCallbackGuard {
 impl Drop for LogCallbackGuard {
     fn drop(&mut self) {
         if self.clear_on_drop {
-            unsafe {
-                td_set_log_message_callback(0, None);
-            }
+            tdjson_sys::set_log_callback(0, None);
         }
     }
 }
@@ -144,14 +152,10 @@ pub fn probe_proxy(
         if let Ok(mut g) = TD_LOG_LINES.try_lock() {
             g.clear();
         }
-        unsafe {
-            td_set_log_message_callback(2, Some(td_log_cb));
-        }
+        tdjson_sys::set_log_callback(2, Some(td_log_cb));
         log_callback_guard.clear_on_drop = true;
     } else {
-        unsafe {
-            td_set_log_message_callback(0, None);
-        }
+        tdjson_sys::set_log_callback(0, None);
     }
 
     let temp = tempfile::Builder::new()
@@ -168,7 +172,7 @@ pub fn probe_proxy(
     let db_path = path_to_tdlib_string(&db_dir);
     let files_path = path_to_tdlib_string(&files_dir);
 
-    let client_id = unsafe { td_create_client_id() };
+    let client_id = tdjson_sys::create_client_id();
     if client_id <= 0 {
         return Err(ProbeError::TdlibInit(format!(
             "td_create_client_id returned invalid id {client_id}"
@@ -201,15 +205,7 @@ pub fn probe_proxy(
     }
 
     while Instant::now() < deadline && ping_result.is_none() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        // Avoid busy-spinning when `remaining` rounds to a zero-second `td_receive` timeout.
-        let slice = remaining
-            .min(Duration::from_millis(500))
-            .max(Duration::from_millis(1));
-        let Some(line) = receive_json(slice) else {
+        let Some(line) = receive_json_until(deadline, Duration::from_millis(500)) else {
             continue;
         };
         let v: Value = match serde_json::from_str(&line) {
@@ -217,7 +213,8 @@ pub fn probe_proxy(
             Err(e) => {
                 td_shutdown_session(client_id);
                 return Err(ProbeError::Internal(format!(
-                    "invalid JSON from td_receive: {e}"
+                    "invalid JSON from td_receive: {e} (utf8_line_bytes={})",
+                    line.len()
                 )));
             }
         };
@@ -226,7 +223,7 @@ pub fn probe_proxy(
             continue;
         }
 
-        let Some(typ) = v.get("@type").and_then(|t| t.as_str()) else {
+        let Some(typ) = json_type_name(&v) else {
             continue;
         };
 
@@ -271,11 +268,7 @@ pub fn probe_proxy(
             }
             "error" => {
                 let ex = extra_for_match(&v).unwrap_or_default();
-                let msg = v
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("unknown TDLib error")
-                    .to_string();
+                let msg = tdlib_error_message(&v);
                 if ex == extra_auth {
                     td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
@@ -309,10 +302,10 @@ pub fn probe_proxy(
             "seconds" => {
                 let ex = extra_for_match(&v).unwrap_or_default();
                 if Some(ex.as_str()) == ping_extra.as_deref() {
-                    let Some(sec) = v.get("seconds").and_then(|s| s.as_f64()) else {
+                    let Some(sec) = parse_tdlib_seconds(&v) else {
                         td_shutdown_session(client_id);
                         return Err(ProbeError::Internal(
-                            "pingProxy response missing seconds".into(),
+                            "pingProxy response missing or unparsable seconds".into(),
                         ));
                     };
                     ping_result = Some(Ok(sec));
@@ -452,18 +445,14 @@ fn send_close(client_id: i32) -> Result<(), ProbeError> {
     send_raw(client_id, &s)?;
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let slice = remaining.min(Duration::from_millis(200)).max(Duration::from_millis(1));
-        let line = receive_json(slice);
-        let Some(line) = line else { continue };
+        let Some(line) = receive_json_until(deadline, Duration::from_millis(200)) else {
+            continue;
+        };
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
             if !client_matches(&v, client_id) {
                 continue;
             }
-            let typ = v.get("@type").and_then(|t| t.as_str()).unwrap_or("");
+            let typ = json_type_name(&v).unwrap_or("");
             if typ == "updateAuthorizationState" {
                 if let Some(st) = auth_state_from_update(&v) {
                     if st == "authorizationStateClosed" {
@@ -478,9 +467,7 @@ fn send_close(client_id: i32) -> Result<(), ProbeError> {
 
 /// Clear the log callback before `close` so TDLib cannot invoke our callback mid-teardown.
 fn td_shutdown_session(client_id: i32) {
-    unsafe {
-        td_set_log_message_callback(0, None);
-    }
+    tdjson_sys::set_log_callback(0, None);
     let _ = send_close(client_id);
 }
 

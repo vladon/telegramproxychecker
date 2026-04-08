@@ -116,6 +116,8 @@ impl ProbeReport {
 pub struct RenderOpts {
     pub verbose: bool,
     pub json: bool,
+    /// Wall-clock probe budget from CLI (verbose diagnostics only).
+    pub probe_timeout_sec: u64,
 }
 
 #[derive(Serialize)]
@@ -147,7 +149,7 @@ pub fn render(
     if opts.json {
         render_json(proxy, report, &mut stdout)?;
     } else if opts.verbose {
-        render_verbose_text(proxy, report, &mut stdout)?;
+        render_verbose_text(proxy, report, opts, &mut stdout)?;
     } else {
         render_default_text(proxy, report, &mut stdout)?;
     }
@@ -200,6 +202,7 @@ fn scrub_tdlib_log_line(line: &str) -> String {
         || low.contains("secret")
         || low.contains("api_hash")
         || low.contains("proxytype")
+        || low.contains("token")
     {
         "[omitted: possible credential substring in tdlib log]".to_string()
     } else {
@@ -210,6 +213,7 @@ fn scrub_tdlib_log_line(line: &str) -> String {
 fn render_verbose_text(
     proxy: &ProxyConfig,
     report: &ProbeReport,
+    opts: &RenderOpts,
     w: &mut impl Write,
 ) -> io::Result<()> {
     writeln!(
@@ -217,6 +221,7 @@ fn render_verbose_text(
         "input_link={}",
         redact_sensitive_query_in_link(&proxy.original_input)
     )?;
+    writeln!(w, "probe_timeout_sec={}", opts.probe_timeout_sec)?;
     writeln!(w, "detected_type={}", proxy_type_str(proxy.kind))?;
     writeln!(w, "server={}", proxy.server)?;
     writeln!(w, "port={}", proxy.port)?;
@@ -303,4 +308,120 @@ pub fn wall_ms() -> u128 {
 /// Build interpretation for a successful probe from latency.
 pub fn success_interpretation(latency_ms: u64) -> Interpretation {
     interpret_latency(latency_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy_link::{ProxyConfig, ProxyKind};
+
+    #[test]
+    fn escape_quotes_handles_backslash_and_double_quote() {
+        assert_eq!(escape_quotes(r#"say "hi""#), r#"say \"hi\""#);
+        assert_eq!(escape_quotes(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn scrub_tdlib_log_line_omits_sensitive_substrings() {
+        assert_eq!(
+            scrub_tdlib_log_line("[v2] connecting"),
+            "[v2] connecting"
+        );
+        assert_eq!(
+            scrub_tdlib_log_line("password=foo"),
+            "[omitted: possible credential substring in tdlib log]"
+        );
+        assert_eq!(
+            scrub_tdlib_log_line("Bearer token xyz"),
+            "[omitted: possible credential substring in tdlib log]"
+        );
+    }
+
+    #[test]
+    fn default_text_ok_and_fail_lines() {
+        let proxy = ProxyConfig {
+            original_input: String::new(),
+            kind: ProxyKind::Socks5,
+            server: "1.2.3.4".into(),
+            port: 1080,
+            mtproto_secret: None,
+            socks_username: None,
+            socks_password: None,
+        };
+        let ok_rep = ProbeReport {
+            ok: true,
+            latency_ms: Some(42),
+            error_message: None,
+            interpretation: Interpretation::ReachableLowLatency,
+            auth_states_seen: vec![],
+            tdlib_log_lines: vec![],
+            probe_start_wall_ms: 0,
+            probe_end_wall_ms: 0,
+            wall_duration: Duration::ZERO,
+            tdlib_reported_seconds: Some(0.042),
+        };
+        let mut buf = Vec::new();
+        render_default_text(&proxy, &ok_rep, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            s.trim_end(),
+            "OK type=socks5 server=1.2.3.4 port=1080 latency_ms=42"
+        );
+
+        let fail_rep = ProbeReport {
+            ok: false,
+            latency_ms: None,
+            error_message: Some(r#"bad"msg"#.into()),
+            interpretation: Interpretation::Timeout,
+            auth_states_seen: vec![],
+            tdlib_log_lines: vec![],
+            probe_start_wall_ms: 0,
+            probe_end_wall_ms: 0,
+            wall_duration: Duration::ZERO,
+            tdlib_reported_seconds: None,
+        };
+        let mut buf = Vec::new();
+        render_default_text(&proxy, &fail_rep, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.starts_with("FAIL type=socks5 server=1.2.3.4 port=1080 error=\""));
+        assert!(s.contains(r#"bad\"m"#));
+    }
+
+    #[test]
+    fn verbose_includes_timeout_and_redacted_link_line() {
+        let proxy = ProxyConfig {
+            original_input: "tg://socks?server=h&port=1080&pass=secret1".into(),
+            kind: ProxyKind::Socks5,
+            server: "h".into(),
+            port: 1080,
+            mtproto_secret: None,
+            socks_username: None,
+            socks_password: Some("secret1".into()),
+        };
+        let rep = ProbeReport {
+            ok: true,
+            latency_ms: Some(1),
+            error_message: None,
+            interpretation: Interpretation::ReachableLowLatency,
+            auth_states_seen: vec!["authorizationStateWaitPhoneNumber".into()],
+            tdlib_log_lines: vec!["[v2] harmless line".into()],
+            probe_start_wall_ms: 10,
+            probe_end_wall_ms: 20,
+            wall_duration: Duration::from_millis(5),
+            tdlib_reported_seconds: Some(0.001),
+        };
+        let opts = RenderOpts {
+            verbose: true,
+            json: false,
+            probe_timeout_sec: 99,
+        };
+        let mut buf = Vec::new();
+        render_verbose_text(&proxy, &rep, &opts, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("probe_timeout_sec=99"));
+        assert!(!s.contains("secret1"));
+        assert!(s.to_ascii_lowercase().contains("redacted"));
+        assert!(s.contains("authorizationStateWaitPhoneNumber"));
+        assert!(s.contains("harmless line"));
+    }
 }

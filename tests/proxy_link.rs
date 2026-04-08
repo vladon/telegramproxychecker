@@ -140,3 +140,35 @@ fn redact_sensitive_query_for_verbose_display() {
     assert!(!red_mt.contains("supersecret"));
     assert!(red_mt.to_ascii_lowercase().contains("redacted"));
 }
+
+#[test]
+fn redact_token_query_param() {
+    let r = redact_sensitive_query_in_link("tg://proxy?server=x&port=443&secret=a&token=sekret");
+    assert!(!r.contains("sekret"));
+    assert!(r.to_ascii_lowercase().contains("redacted"));
+}
+
+#[test]
+fn server_too_long_rejected() {
+    let server = "a".repeat(600);
+    let url = format!("tg://proxy?server={server}&port=443&secret=ab");
+    let e = parse_proxy_link(&url).unwrap_err();
+    assert!(
+        matches!(e, ParseError::InvalidUrl(ref s) if s.contains("server") && s.contains("maximum length"))
+    );
+}
+
+#[test]
+fn server_with_newline_rejected() {
+    let e = parse_proxy_link("tg://proxy?server=x%0Ay&port=443&secret=ab").unwrap_err();
+    assert!(
+        matches!(e, ParseError::InvalidUrl(ref s) if s.contains("control"))
+    );
+}
+
+#[test]
+fn absurd_port_string_rejected() {
+    let p = "1".repeat(30);
+    let url = format!("tg://proxy?server=x&port={p}&secret=ab");
+    assert_eq!(parse_proxy_link(&url), Err(ParseError::InvalidPort));
+}

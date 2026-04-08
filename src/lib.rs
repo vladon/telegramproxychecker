@@ -49,6 +49,7 @@ pub fn run() -> ExitCode {
             let opts = RenderOpts {
                 verbose: resolved.verbose,
                 json: resolved.json,
+                probe_timeout_sec: resolved.timeout.as_secs(),
             };
             let _ = output::render(&proxy, &partial, &opts);
             return exit;
@@ -58,6 +59,7 @@ pub fn run() -> ExitCode {
     let opts = RenderOpts {
         verbose: resolved.verbose,
         json: resolved.json,
+        probe_timeout_sec: resolved.timeout.as_secs(),
     };
 
     if let Err(e) = output::render(&proxy, &report, &opts) {

@@ -140,13 +140,14 @@ fn classify(url: &Url) -> Result<ProxyKind, ParseError> {
     }
 }
 
+/// First occurrence wins; keys are ASCII-lowercased so `Secret` / `PORT` match Telegram’s usual params.
 fn query_pairs_map(url: &Url) -> HashMap<String, String> {
-    url.query_pairs()
-        .into_owned()
-        .fold(HashMap::new(), |mut acc, (k, v)| {
-            acc.insert(k, v);
-            acc
-        })
+    let mut acc = HashMap::new();
+    for (k, v) in url.query_pairs().into_owned() {
+        let kl = k.to_ascii_lowercase();
+        acc.entry(kl).or_insert(v);
+    }
+    acc
 }
 
 /// Rebuilds the link query with `secret` and `pass` values replaced so verbose logs never echo raw credentials.
@@ -155,17 +156,19 @@ pub fn redact_sensitive_query_in_link(input: &str) -> String {
     let Ok(mut url) = Url::parse(input.trim()) else {
         return "<could not parse link for display>".to_string();
     };
+    // Strip userinfo so `https://user:pass@host/...` cannot leak via `url.to_string()`.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
     if url.query().is_none() {
         return url.to_string();
     }
     let mut ser = url.query_pairs().fold(
         url::form_urlencoded::Serializer::new(String::new()),
         |mut ser, (k, v)| {
-            let v_out = if k.eq_ignore_ascii_case("secret") || k.eq_ignore_ascii_case("pass") {
-                "<redacted>"
-            } else {
-                v.as_ref()
-            };
+            let redact = k.eq_ignore_ascii_case("secret")
+                || k.eq_ignore_ascii_case("pass")
+                || k.eq_ignore_ascii_case("password");
+            let v_out = if redact { "<redacted>" } else { v.as_ref() };
             ser.append_pair(k.as_ref(), v_out);
             ser
         },

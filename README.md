@@ -93,7 +93,7 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 
 ### Verbose TDLib logs
 
-With `--verbose`, internal TDLib log lines are printed. Upstream rarely includes raw proxy passwords in log text, but **theoretically** a TDLib version could log sensitive data. Treat verbose logs like any other diagnostic stream in untrusted environments.
+With `--verbose`, internal TDLib log lines are printed. Lines that appear to mention `password`, `secret`, `api_hash`, or `proxytype` are replaced with a placeholder to reduce accidental credential leakage; this is heuristic and not a cryptographic guarantee.
 
 This project links the **shared TDLib JSON client** library:
 
@@ -138,12 +138,13 @@ If you ship a `tdjson.pc` file, `pkg-config` is tried automatically.
 
 ### macOS
 
-Same as Linux, using `libtdjson.dylib` and `DYLD_LIBRARY_PATH` / rpath as appropriate.
+Same as Linux for `libtdjson.dylib`. If the loader cannot find the library, set `DYLD_LIBRARY_PATH` to the directory containing the dylib (SIP may restrict some `DYLD_*` uses for system binaries). Custom TDLib builds sometimes need `install_name_tool` or an `@rpath` baked into the dylib.
 
 ### Windows
 
-- Place `tdjson.dll` where the loader can find it (same folder as `tg-proxy-check.exe` or on `PATH`).
-- When linking with MSVC, you may need the import library matching your TDLib build; set `TDLIB_LIB_DIR` to that folder.
+- The loader searches the executable’s directory first, then `PATH`. Keep `tdjson.dll` next to `tg-proxy-check.exe` for the least fragile layout.
+- **MSVC**: point `TDLIB_LIB_DIR` at the folder containing `tdjson.lib` (import library) for the link step; ship the matching `tdjson.dll` at run time.
+- **GNU / MinGW**: you may need `RUSTFLAGS=-L/path/to/lib` in addition to `TDLIB_LIB_DIR`, depending on your toolchain.
 
 ### Building without TDLib (parser / tests only)
 

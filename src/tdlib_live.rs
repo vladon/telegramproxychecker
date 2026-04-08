@@ -22,6 +22,8 @@ fn next_extra(prefix: &str) -> String {
     format!("{}-{}-{}", prefix, wall_ms(), n)
 }
 
+/// Never block TDLib: if the main thread holds `TD_LOG_LINES` during a future refactor, `try_lock`
+/// drops the line instead of risking a deadlock with `td_receive` on the same thread.
 extern "C" fn td_log_cb(verbosity: libc::c_int, message: *const libc::c_char) {
     if message.is_null() {
         return;
@@ -30,7 +32,7 @@ extern "C" fn td_log_cb(verbosity: libc::c_int, message: *const libc::c_char) {
         let Ok(s) = CStr::from_ptr(message).to_str() else {
             return;
         };
-        if let Ok(mut g) = TD_LOG_LINES.lock() {
+        if let Ok(mut g) = TD_LOG_LINES.try_lock() {
             const MAX: usize = 256;
             if g.len() >= MAX {
                 g.remove(0);
@@ -51,15 +53,28 @@ extern "C" {
 }
 
 fn receive_json(timeout: Duration) -> Option<String> {
-    let secs = timeout.as_secs_f64().max(0.0);
+    // Cap upper bound: td_receive expects seconds as double; absurd values are unnecessary.
+    let secs = timeout.as_secs_f64().clamp(0.0, 86400.0);
     unsafe {
         let ptr = td_receive(secs);
         if ptr.is_null() {
             return None;
         }
+        // TDLib guarantees a valid UTF-8 JSON line; invalid UTF-8 is treated as empty update.
         let s = CStr::from_ptr(ptr).to_str().ok()?.to_string();
         Some(s)
     }
+}
+
+/// Normalize `@extra` for comparisons (TDLib normally uses a string; be defensive).
+fn extra_for_match(v: &Value) -> Option<String> {
+    let e = v.get("@extra")?;
+    Some(match e {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => serde_json::to_string(e).unwrap_or_default(),
+    })
 }
 
 /// Sends a JSON request. TDLib copies the buffer before `td_send` returns; the `CString` only
@@ -96,6 +111,21 @@ fn auth_state_from_update(v: &Value) -> Option<String> {
         .map(String::from)
 }
 
+struct LogCallbackGuard {
+    /// If true, `td_set_log_message_callback(0, None)` on drop (verbose path installed `td_log_cb`).
+    clear_on_drop: bool,
+}
+
+impl Drop for LogCallbackGuard {
+    fn drop(&mut self) {
+        if self.clear_on_drop {
+            unsafe {
+                td_set_log_message_callback(0, None);
+            }
+        }
+    }
+}
+
 /// Run TDLib `pingProxy` for the given proxy configuration.
 pub fn probe_proxy(
     proxy: &ProxyConfig,
@@ -106,13 +136,18 @@ pub fn probe_proxy(
     let start_instant = Instant::now();
     let deadline = start_instant + settings.timeout;
 
+    let mut log_callback_guard = LogCallbackGuard {
+        clear_on_drop: false,
+    };
+
     if settings.verbose {
-        if let Ok(mut g) = TD_LOG_LINES.lock() {
+        if let Ok(mut g) = TD_LOG_LINES.try_lock() {
             g.clear();
         }
         unsafe {
             td_set_log_message_callback(2, Some(td_log_cb));
         }
+        log_callback_guard.clear_on_drop = true;
     } else {
         unsafe {
             td_set_log_message_callback(0, None);
@@ -134,10 +169,10 @@ pub fn probe_proxy(
     let files_path = path_to_tdlib_string(&files_dir);
 
     let client_id = unsafe { td_create_client_id() };
-    if client_id == 0 {
-        return Err(ProbeError::TdlibInit(
-            "td_create_client_id returned 0".into(),
-        ));
+    if client_id <= 0 {
+        return Err(ProbeError::TdlibInit(format!(
+            "td_create_client_id returned invalid id {client_id}"
+        )));
     }
 
     let mut auth_states_seen: Vec<String> = Vec::new();
@@ -167,7 +202,13 @@ pub fn probe_proxy(
 
     while Instant::now() < deadline && ping_result.is_none() {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let slice = remaining.min(Duration::from_millis(500));
+        if remaining.is_zero() {
+            break;
+        }
+        // Avoid busy-spinning when `remaining` rounds to a zero-second `td_receive` timeout.
+        let slice = remaining
+            .min(Duration::from_millis(500))
+            .max(Duration::from_millis(1));
         let Some(line) = receive_json(slice) else {
             continue;
         };
@@ -229,34 +270,34 @@ pub fn probe_proxy(
                 }
             }
             "error" => {
-                let extra = v.get("@extra").and_then(|e| e.as_str()).unwrap_or("");
+                let ex = extra_for_match(&v).unwrap_or_default();
                 let msg = v
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown TDLib error")
                     .to_string();
-                if extra == extra_auth.as_str() {
+                if ex == extra_auth {
                     td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
                 }
                 if let Some(pe) = ping_extra.as_deref() {
-                    if extra == pe {
+                    if ex == pe {
                         ping_result = Some(Err(msg));
                         break;
                     }
                 }
-                if extra.starts_with("setTdlibParameters-") {
+                if ex.starts_with("setTdlibParameters-") {
                     td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
                 }
-                if extra.starts_with("checkDatabaseEncryptionKey-") {
+                if ex.starts_with("checkDatabaseEncryptionKey-") {
                     td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
                 }
             }
             "ok" => {
-                let extra = v.get("@extra").and_then(|e| e.as_str()).unwrap_or("");
-                if extra.starts_with("checkDatabaseEncryptionKey-") {
+                let ex = extra_for_match(&v).unwrap_or_default();
+                if ex.starts_with("checkDatabaseEncryptionKey-") {
                     if let Err(e) =
                         try_send_ping(client_id, proxy, &mut ping_extra, &mut ping_result)
                     {
@@ -266,8 +307,8 @@ pub fn probe_proxy(
                 }
             }
             "seconds" => {
-                let extra = v.get("@extra").and_then(|e| e.as_str()).unwrap_or("");
-                if Some(extra) == ping_extra.as_deref() {
+                let ex = extra_for_match(&v).unwrap_or_default();
+                if Some(ex.as_str()) == ping_extra.as_deref() {
                     let Some(sec) = v.get("seconds").and_then(|s| s.as_f64()) else {
                         td_shutdown_session(client_id);
                         return Err(ProbeError::Internal(
@@ -350,15 +391,14 @@ fn handle_auth_state(
 ) -> Result<(), ProbeError> {
     match state {
         "authorizationStateWaitTdlibParameters" if !*set_params_sent => {
-            *set_params_sent = true;
             let extra = next_extra("setTdlibParameters");
             let req = build_set_tdlib_parameters(extra.as_str(), db_path, files_path, creds);
             let s = serde_json::to_string(&req)
                 .map_err(|e| ProbeError::Internal(format!("serialize setTdlibParameters: {e}")))?;
             send_raw(client_id, &s)?;
+            *set_params_sent = true;
         }
         "authorizationStateWaitEncryptionKey" if !*check_key_sent => {
-            *check_key_sent = true;
             let extra = next_extra("checkDatabaseEncryptionKey");
             let req = json!({
                 "@type": "checkDatabaseEncryptionKey",
@@ -369,6 +409,7 @@ fn handle_auth_state(
                 ProbeError::Internal(format!("serialize checkDatabaseEncryptionKey: {e}"))
             })?;
             send_raw(client_id, &s)?;
+            *check_key_sent = true;
         }
         "authorizationStateWaitPhoneNumber" => {
             try_send_ping(client_id, proxy, ping_extra, ping_result)?;
@@ -397,7 +438,10 @@ fn try_send_ping(
 }
 
 fn copy_log_lines() -> Vec<String> {
-    TD_LOG_LINES.lock().map(|g| g.clone()).unwrap_or_default()
+    TD_LOG_LINES
+        .try_lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
 }
 
 fn send_close(client_id: i32) -> Result<(), ProbeError> {
@@ -408,7 +452,12 @@ fn send_close(client_id: i32) -> Result<(), ProbeError> {
     send_raw(client_id, &s)?;
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        let line = receive_json(Duration::from_millis(200));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let slice = remaining.min(Duration::from_millis(200)).max(Duration::from_millis(1));
+        let line = receive_json(slice);
         let Some(line) = line else { continue };
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
             if !client_matches(&v, client_id) {
@@ -427,12 +476,12 @@ fn send_close(client_id: i32) -> Result<(), ProbeError> {
     Ok(())
 }
 
-/// Close the TDLib client and detach our log callback so a future probe in the same process starts clean.
+/// Clear the log callback before `close` so TDLib cannot invoke our callback mid-teardown.
 fn td_shutdown_session(client_id: i32) {
-    let _ = send_close(client_id);
     unsafe {
         td_set_log_message_callback(0, None);
     }
+    let _ = send_close(client_id);
 }
 
 fn path_to_tdlib_string(p: &std::path::Path) -> String {

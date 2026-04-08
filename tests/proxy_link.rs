@@ -109,6 +109,26 @@ fn telegram_me_host_mtproto() {
 }
 
 #[test]
+fn query_keys_case_insensitive() {
+    let c = parse_proxy_link("tg://proxy?server=x&port=443&Secret=first&secret=second").unwrap();
+    assert_eq!(c.mtproto_secret.as_deref(), Some("first"));
+}
+
+#[test]
+fn duplicate_query_first_wins() {
+    let c = parse_proxy_link("tg://proxy?server=x&port=443&port=1080&secret=ab").unwrap();
+    assert_eq!(c.port, 443);
+}
+
+#[test]
+fn redact_strips_userinfo_and_password_param() {
+    let r = redact_sensitive_query_in_link("https://u:p@t.me/proxy?server=x&port=443&secret=z&password=zz");
+    assert!(!r.contains("u:p@"));
+    assert!(!r.contains("zz"));
+    assert!(r.to_ascii_lowercase().contains("redacted"));
+}
+
+#[test]
 fn redact_sensitive_query_for_verbose_display() {
     let raw = "tg://socks?server=x&port=1080&user=u&pass=secretpass";
     let redacted = redact_sensitive_query_in_link(raw);

@@ -17,6 +17,13 @@ fn main() {
         return;
     }
 
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
+        println!("cargo:warning=Windows: link with `tdjson.lib` from TDLIB_LIB_DIR (MSVC) or pass `-L` via RUSTFLAGS for GNU; ship `tdjson.dll` beside the exe or on PATH at runtime.");
+    } else if target_os == "macos" {
+        println!("cargo:warning=macOS: if loading fails at runtime, set `DYLD_LIBRARY_PATH` to the folder containing `libtdjson.dylib`, or fix install names with `install_name_tool` / `@rpath` when you build TDLib.");
+    }
+
     let lib_name = "tdjson";
 
     if let Ok(dir) = env::var("TDLIB_LIB_DIR") {

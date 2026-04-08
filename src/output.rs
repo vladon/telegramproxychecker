@@ -193,6 +193,20 @@ fn escape_quotes(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// TDLib may echo JSON fragments; drop lines that look like they contain credentials.
+fn scrub_tdlib_log_line(line: &str) -> String {
+    let low = line.to_ascii_lowercase();
+    if low.contains("password")
+        || low.contains("secret")
+        || low.contains("api_hash")
+        || low.contains("proxytype")
+    {
+        "[omitted: possible credential substring in tdlib log]".to_string()
+    } else {
+        line.to_string()
+    }
+}
+
 fn render_verbose_text(
     proxy: &ProxyConfig,
     report: &ProbeReport,
@@ -240,7 +254,7 @@ fn render_verbose_text(
     if !report.tdlib_log_lines.is_empty() {
         writeln!(w, "tdlib_log:")?;
         for line in &report.tdlib_log_lines {
-            writeln!(w, "  {}", line)?;
+            writeln!(w, "  {}", scrub_tdlib_log_line(line))?;
         }
     }
     writeln!(w, "interpretation={}", report.interpretation.as_str())?;

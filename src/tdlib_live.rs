@@ -9,8 +9,10 @@
 use super::tdjson_sys;
 use super::{TdlibCredentials, TdlibProbeSettings};
 use crate::error::{ProbeError, ProbeTimeoutContext};
-use crate::output::{success_interpretation, wall_ms, Interpretation, ProbeReport};
-use crate::output::SponsoredReport;
+use crate::output::{
+    success_interpretation, wall_ms, Interpretation, ProbeReport, SponsoredReport,
+    SubscriptionReport,
+};
 use crate::proxy_link::{ProxyConfig, ProxyKind};
 use serde_json::{json, Value};
 use std::ffi::CStr;
@@ -172,16 +174,27 @@ pub fn probe_proxy(
         tdjson_sys::set_log_callback(0, None);
     }
 
-    let temp = tempfile::Builder::new()
-        .prefix("tg-proxy-check-tdlib-")
-        .tempdir()
-        .map_err(|e| ProbeError::Internal(format!("temp dir: {e}")))?;
-    let db_dir = temp.path().join("db");
-    let files_dir = temp.path().join("files");
-    std::fs::create_dir_all(&db_dir)
-        .map_err(|e| ProbeError::Internal(format!("create database_directory: {e}")))?;
-    std::fs::create_dir_all(&files_dir)
-        .map_err(|e| ProbeError::Internal(format!("create files_directory: {e}")))?;
+    let (_temp_holder, db_dir, files_dir) = if let Some(root) = settings.auth_session.as_ref() {
+        let files_dir = root.join("tg-proxy-check-files");
+        std::fs::create_dir_all(root)
+            .map_err(|e| ProbeError::Internal(format!("create auth_session database dir: {e}")))?;
+        std::fs::create_dir_all(&files_dir).map_err(|e| {
+            ProbeError::Internal(format!("create auth_session files directory: {e}"))
+        })?;
+        (None::<tempfile::TempDir>, root.clone(), files_dir)
+    } else {
+        let temp = tempfile::Builder::new()
+            .prefix("tg-proxy-check-tdlib-")
+            .tempdir()
+            .map_err(|e| ProbeError::Internal(format!("temp dir: {e}")))?;
+        let db_dir = temp.path().join("db");
+        let files_dir = temp.path().join("files");
+        std::fs::create_dir_all(&db_dir)
+            .map_err(|e| ProbeError::Internal(format!("create database_directory: {e}")))?;
+        std::fs::create_dir_all(&files_dir)
+            .map_err(|e| ProbeError::Internal(format!("create files_directory: {e}")))?;
+        (Some(temp), db_dir, files_dir)
+    };
 
     let db_path = path_to_tdlib_string(&db_dir);
     let files_path = path_to_tdlib_string(&files_dir);
@@ -199,6 +212,7 @@ pub fn probe_proxy(
     let mut add_proxy_extra: Option<String> = None;
     let mut ping_extra: Option<String> = None;
     let mut ping_result: Option<Result<f64, String>> = None;
+    let mut authorization_state: Option<String> = None;
 
     let extra_auth = next_extra("getAuthorizationState");
     let get_auth = json!({
@@ -237,6 +251,8 @@ pub fn probe_proxy(
         if !client_matches(&v, client_id) {
             continue;
         }
+
+        note_auth_from_value(&v, &mut authorization_state);
 
         let Some(typ) = json_type_name(&v) else {
             continue;
@@ -375,14 +391,13 @@ pub fn probe_proxy(
         }));
     };
 
-    let sponsored = match (&pr, proxy.kind) {
-        (Ok(_), ProxyKind::Socks5) => SponsoredReport::socks5_na(),
-        (Ok(_), ProxyKind::Mtproto) => detect_mtproto_sponsored_channel(client_id, deadline),
-        (Err(_), ProxyKind::Socks5) => SponsoredReport::socks5_na(),
-        (Err(_), ProxyKind::Mtproto) => {
-            SponsoredReport::unknown_none("pingProxy did not succeed")
-        }
-    };
+    let (sponsored, subscription) = promo_and_subscription_after_ping(
+        client_id,
+        deadline,
+        settings,
+        proxy,
+        &mut authorization_state,
+    );
 
     td_shutdown_session(client_id);
 
@@ -402,6 +417,7 @@ pub fn probe_proxy(
                 wall_duration,
                 tdlib_reported_seconds: Some(sec),
                 sponsored,
+                subscription,
             })
         }
         Err(msg) => Ok(ProbeReport {
@@ -416,6 +432,7 @@ pub fn probe_proxy(
             wall_duration,
             tdlib_reported_seconds: None,
             sponsored,
+            subscription,
         }),
     }
 }
@@ -426,33 +443,60 @@ fn push_unique(v: &mut Vec<String>, s: &str) {
     }
 }
 
-/// After a successful `pingProxy`, ask TDLib to load the main chat list and look for
-/// [`chatSourceMtprotoProxy`](https://core.telegram.org/tdlib/docs/td__api_8h.html) on a chat
-/// position (TDLib marks promo channels inserted by an MTProto proxy this way). No login is
-/// performed; if nothing is observed before the probe deadline, status stays **unknown**.
-fn detect_mtproto_sponsored_channel(client_id: i32, deadline: Instant) -> SponsoredReport {
-    if Instant::now() >= deadline {
-        return SponsoredReport::unknown_tdlib(
-            "probe deadline already reached before loadChats",
+fn note_auth_from_value(v: &Value, auth: &mut Option<String>) {
+    if let Some(st) = auth_state_from_update(v) {
+        *auth = Some(st);
+        return;
+    }
+    if let Some(typ) = json_type_name(v) {
+        if typ.starts_with("authorizationState") {
+            *auth = Some(typ.to_string());
+        }
+    }
+}
+
+/// MTProto + `--auth-session`: wait for `authorizationStateReady`, then `getPromoData` (TDLib JSON name).
+fn promo_and_subscription_after_ping(
+    client_id: i32,
+    deadline: Instant,
+    settings: &TdlibProbeSettings,
+    proxy: &ProxyConfig,
+    authorization_state: &mut Option<String>,
+) -> (SponsoredReport, SubscriptionReport) {
+    if settings.auth_session.is_none() || proxy.kind != ProxyKind::Mtproto {
+        return (
+            SponsoredReport::unknown_unchecked(),
+            SubscriptionReport::unchecked(),
         );
     }
-    let extra = next_extra("loadChats");
-    let req = json!({
-        "@type": "loadChats",
-        "chat_list": {"@type": "chatListMain"},
-        "limit": 100,
-        "@extra": extra,
-    });
-    let req_s = match serde_json::to_string(&req) {
-        Ok(s) => s,
-        Err(_) => return SponsoredReport::unknown_tdlib("serialize loadChats failed"),
-    };
-    if send_raw(client_id, &req_s).is_err() {
-        return SponsoredReport::unknown_tdlib("send loadChats failed");
+    if !wait_for_authorization_ready(client_id, deadline, authorization_state) {
+        return (
+            SponsoredReport::unknown_unchecked(),
+            SubscriptionReport::unchecked(),
+        );
     }
+    run_get_promo_flow(client_id, deadline)
+}
 
-    let mut saw_load_response = false;
-
+fn wait_for_authorization_ready(
+    client_id: i32,
+    deadline: Instant,
+    auth: &mut Option<String>,
+) -> bool {
+    if auth.as_deref() == Some("authorizationStateReady") {
+        return true;
+    }
+    let extra = next_extra("getAuthorizationState");
+    let req = match serde_json::to_string(&json!({
+        "@type": "getAuthorizationState",
+        "@extra": &extra,
+    })) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if send_raw(client_id, &req).is_err() {
+        return false;
+    }
     while Instant::now() < deadline {
         let Some(line) = receive_json_until(deadline, Duration::from_millis(500)) else {
             continue;
@@ -463,78 +507,209 @@ fn detect_mtproto_sponsored_channel(client_id: i32, deadline: Instant) -> Sponso
         if !client_matches(&v, client_id) {
             continue;
         }
+        note_auth_from_value(&v, auth);
+        if auth.as_deref() == Some("authorizationStateReady") {
+            return true;
+        }
+        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(extra.as_str())
+        {
+            return false;
+        }
+        if let Some(t) = json_type_name(&v) {
+            if extra_for_match(&v).as_deref() == Some(extra.as_str())
+                && t.starts_with("authorizationState")
+            {
+                *auth = Some(t.to_string());
+                if t == "authorizationStateReady" {
+                    return true;
+                }
+            }
+        }
+    }
+    auth.as_deref() == Some("authorizationStateReady")
+}
 
-        let Some(typ) = json_type_name(&v) else {
+fn run_get_promo_flow(client_id: i32, deadline: Instant) -> (SponsoredReport, SubscriptionReport) {
+    let extra = next_extra("getPromoData");
+    let req = match serde_json::to_string(&json!({
+        "@type": "getPromoData",
+        "@extra": &extra,
+    })) {
+        Ok(s) => s,
+        Err(_) => {
+            return (
+                SponsoredReport::unknown_unchecked(),
+                SubscriptionReport::checked_no_join_info(),
+            );
+        }
+    };
+    if send_raw(client_id, &req).is_err() {
+        return (
+            SponsoredReport::unknown_unchecked(),
+            SubscriptionReport::checked_no_join_info(),
+        );
+    }
+    while Instant::now() < deadline {
+        let Some(line) = receive_json_until(deadline, Duration::from_millis(500)) else {
             continue;
         };
-
-        if typ == "error" {
-            if extra_for_match(&v).as_deref() != Some(extra.as_str()) {
-                continue;
-            }
-            let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-            // TDLib uses 404 when there is nothing left to load for `loadChats`.
-            if code == 404 {
-                saw_load_response = true;
-                continue;
-            }
-            let msg = tdlib_error_message(&v);
-            return SponsoredReport::unknown_tdlib(format!("loadChats: {msg} (code {code})"));
-        }
-
-        if typ == "ok" && extra_for_match(&v).as_deref() == Some(extra.as_str()) {
-            saw_load_response = true;
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if !client_matches(&v, client_id) {
             continue;
         }
-
-        if typ == "updateNewChat" {
-            if let Some(id) = chat_id_if_mtproto_sponsored_from_new_chat(&v) {
-                return SponsoredReport::yes_tdlib(id, "chatSourceMtprotoProxy in updateNewChat");
-            }
+        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(extra.as_str())
+        {
+            return (
+                SponsoredReport::unknown_unchecked(),
+                SubscriptionReport::checked_no_join_info(),
+            );
         }
+        if extra_for_match(&v).as_deref() == Some(extra.as_str()) {
+            return parse_get_promo_response(&v, client_id, deadline);
+        }
+    }
+    (
+        SponsoredReport::unknown_unchecked(),
+        SubscriptionReport::checked_no_join_info(),
+    )
+}
 
-        if typ == "updateChatPosition" {
-            if let Some(id) = chat_id_if_mtproto_sponsored_from_position_update(&v) {
-                return SponsoredReport::yes_tdlib(
-                    id,
-                    "chatSourceMtprotoProxy in updateChatPosition",
+fn parse_get_promo_response(
+    v: &Value,
+    client_id: i32,
+    deadline: Instant,
+) -> (SponsoredReport, SubscriptionReport) {
+    match v.get("@type").and_then(|t| t.as_str()) {
+        Some("promoDataEmpty") => (
+            SponsoredReport::no_promo(),
+            SubscriptionReport::checked_no_join_info(),
+        ),
+        Some("promoData") => {
+            let Some(peer) = v.get("peer").filter(|p| !p.is_null()) else {
+                return (
+                    SponsoredReport::unknown_unchecked(),
+                    SubscriptionReport::checked_no_join_info(),
                 );
-            }
+            };
+            let Some(display_id) = peer_display_id(peer) else {
+                return (
+                    SponsoredReport::unknown_unchecked(),
+                    SubscriptionReport::checked_no_join_info(),
+                );
+            };
+            let sponsored = SponsoredReport::yes_with_peer_id(display_id);
+            let Some(chat_id) = tdlib_chat_id_for_peer(peer) else {
+                return (
+                    sponsored,
+                    SubscriptionReport::checked_no_join_info(),
+                );
+            };
+            let Some(user_id) = fetch_my_user_id(client_id, deadline) else {
+                return (
+                    sponsored,
+                    SubscriptionReport::checked_no_join_info(),
+                );
+            };
+            let joined = fetch_am_i_member(client_id, deadline, chat_id, user_id);
+            let sub = SubscriptionReport {
+                checked: true,
+                joined,
+            };
+            (sponsored, sub)
         }
-    }
-
-    if saw_load_response {
-        SponsoredReport::unknown_tdlib(
-            "no chat with chatSourceMtprotoProxy observed before probe deadline",
-        )
-    } else {
-        SponsoredReport::unknown_tdlib("loadChats did not complete before probe deadline")
+        _ => (
+            SponsoredReport::unknown_unchecked(),
+            SubscriptionReport::checked_no_join_info(),
+        ),
     }
 }
 
-fn position_source_is_mtproto_proxy(pos: &Value) -> bool {
-    pos.pointer("/source/@type")
-        .and_then(|t| t.as_str())
-        == Some("chatSourceMtprotoProxy")
+fn peer_display_id(peer: &Value) -> Option<i64> {
+    let t = peer.get("@type")?.as_str()?;
+    match t {
+        "peerChannel" => peer.get("channel_id").and_then(|x| x.as_i64()),
+        "peerChat" => peer.get("chat_id").and_then(|x| x.as_i64()),
+        "peerUser" => peer.get("user_id").and_then(|x| x.as_i64()),
+        _ => None,
+    }
 }
 
-fn chat_id_if_mtproto_sponsored_from_new_chat(v: &Value) -> Option<i64> {
-    let chat = v.get("chat")?;
-    let arr = chat.get("positions")?.as_array()?;
-    for p in arr {
-        if position_source_is_mtproto_proxy(p) {
-            return chat.get("id").and_then(|x| x.as_i64());
+fn tdlib_chat_id_for_peer(peer: &Value) -> Option<i64> {
+    let t = peer.get("@type")?.as_str()?;
+    match t {
+        "peerChannel" => {
+            let cid = peer.get("channel_id").and_then(|x| x.as_i64())?;
+            Some(-(1_000_000_000_000_i64 + cid))
+        }
+        "peerChat" => peer.get("chat_id").and_then(|x| x.as_i64()),
+        "peerUser" => peer.get("user_id").and_then(|x| x.as_i64()),
+        _ => None,
+    }
+}
+
+fn fetch_my_user_id(client_id: i32, deadline: Instant) -> Option<i64> {
+    let extra = next_extra("getMe");
+    let req = serde_json::to_string(&json!({ "@type": "getMe", "@extra": &extra })).ok()?;
+    send_raw(client_id, &req).ok()?;
+    while Instant::now() < deadline {
+        let line = receive_json_until(deadline, Duration::from_millis(500))?;
+        let v: Value = serde_json::from_str(&line).ok()?;
+        if !client_matches(&v, client_id) {
+            continue;
+        }
+        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(extra.as_str())
+        {
+            return None;
+        }
+        if extra_for_match(&v).as_deref() == Some(extra.as_str()) && json_type_name(&v) == Some("user")
+        {
+            return v.get("id").and_then(|x| x.as_i64());
         }
     }
     None
 }
 
-fn chat_id_if_mtproto_sponsored_from_position_update(v: &Value) -> Option<i64> {
-    let pos = v.get("position")?;
-    if !position_source_is_mtproto_proxy(pos) {
-        return None;
+fn fetch_am_i_member(client_id: i32, deadline: Instant, chat_id: i64, user_id: i64) -> Option<bool> {
+    let extra = next_extra("getChatMember");
+    let req = serde_json::to_string(&json!({
+        "@type": "getChatMember",
+        "chat_id": chat_id,
+        "member_id": { "@type": "messageSenderUser", "user_id": user_id },
+        "@extra": &extra,
+    }))
+    .ok()?;
+    send_raw(client_id, &req).ok()?;
+    while Instant::now() < deadline {
+        let line = receive_json_until(deadline, Duration::from_millis(500))?;
+        let v: Value = serde_json::from_str(&line).ok()?;
+        if !client_matches(&v, client_id) {
+            continue;
+        }
+        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(extra.as_str())
+        {
+            return None;
+        }
+        if extra_for_match(&v).as_deref() == Some(extra.as_str())
+            && json_type_name(&v) == Some("chatMember")
+        {
+            return chat_member_is_joined(&v);
+        }
     }
-    v.get("chat_id").and_then(|x| x.as_i64())
+    None
+}
+
+fn chat_member_is_joined(v: &Value) -> Option<bool> {
+    let st = v.pointer("/status/@type")?.as_str()?;
+    Some(match st {
+        "chatMemberStatusLeft" | "chatMemberStatusBanned" => false,
+        "chatMemberStatusMember"
+        | "chatMemberStatusAdministrator"
+        | "chatMemberStatusRestricted"
+        | "chatMemberStatusCreator" => true,
+        _ => return None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

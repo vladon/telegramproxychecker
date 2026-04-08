@@ -48,6 +48,7 @@ tg-proxy-check --proxy-link 'https://t.me/socks?server=1.2.3.4&port=1080'
 | `--verbose` | Extra diagnostics; sensitive query params redacted in `input_link=`; see note on TDLib logs below. |
 | `--json` | Single-line JSON on stdout. |
 | `--timeout SECONDS` | Wall-clock limit for the whole probe (default: 60). |
+| `--auth-session DIR` | Existing directory for TDLib `database_directory` (logged-in session). Enables **`getPromoData`** / subscription checks on MTProto success; optional. |
 | `--api-id` / `--api-hash` | Override `TG_API_ID` / `TG_API_HASH`. |
 
 ## Example output
@@ -69,15 +70,15 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 **JSON success:**
 
 ```json
-{"ok":true,"proxy_type":"mtproto","server":"1.2.3.4","port":443,"latency_ms":412,"message":"Telegram reachable through proxy","sponsored":{"status":"unknown","method":"tdlib","channel_id":null,"note":"no chat with chatSourceMtprotoProxy observed before probe deadline"}}
+{"ok":true,"proxy_type":"mtproto","server":"1.2.3.4","port":443,"latency_ms":412,"message":"Telegram reachable through proxy","sponsored":{"status":"unknown","channel_id":null},"subscription":{"checked":false,"joined":null}}
 ```
 
-The **`sponsored`** object is always present. For **MTProto**, the tool calls TDLib **`loadChats`** after a successful **`pingProxy`** and treats a chat whose position has **`chatSourceMtprotoProxy`** as a sponsored promo channel (`status: "yes"`). If TDLib never delivers such an update before `--timeout`, `status` is **`unknown`** (not **`no`**—absence of updates is not proof there is no sponsor). For **SOCKS5**, `status` is always **`unknown`** with `method: "none"`.
+**`sponsored`** and **`subscription`** are always present. Without **`--auth-session`**, `sponsored.status` is **`unknown`**, `subscription.checked` is **`false`**, and no promo calls are made. With **`--auth-session DIR`** (an existing directory used as TDLib `database_directory` for a logged-in session; files go under `DIR/tg-proxy-check-files/`), **MTProto** probes wait for **`authorizationStateReady`**, then call TDLib **`getPromoData`**. Responses are interpreted only by `@type`: **`promoDataEmpty`** → `sponsored.no`; **`promoData`** with a non-null **`peer`** → `sponsored.yes` and `channel_id` from that peer; otherwise **`unknown`**. If there is a promo peer, the tool calls **`getMe`** and **`getChatMember`** so **`subscription.joined`** can be **`true`** / **`false`** when TDLib returns **`chatMember`** (otherwise **`null`**). **`getPromoData` is not in all TDLib versions**—if TDLib returns an error for that request, `sponsored` stays **`unknown`** and **`subscription.checked`** is **`true`**. SOCKS5 does not run this path (`checked` stays **`false`**).
 
 **JSON failure:**
 
 ```json
-{"ok":false,"proxy_type":"socks5","server":"1.2.3.4","port":1080,"error":"Proxy connection failed","message":"Telegram unreachable through proxy","sponsored":{"status":"unknown","method":"none","channel_id":null,"note":"not applicable for socks5"}}
+{"ok":false,"proxy_type":"socks5","server":"1.2.3.4","port":1080,"error":"Proxy connection failed","message":"Telegram unreachable through proxy","sponsored":{"status":"unknown","channel_id":null},"subscription":{"checked":false,"joined":null}}
 ```
 
 ## Exit codes

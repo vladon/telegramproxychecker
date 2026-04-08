@@ -3,6 +3,7 @@
 use crate::error::CliError;
 use clap::Parser;
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Parser)]
@@ -39,6 +40,11 @@ pub struct Cli {
 
     #[arg(long, value_name = "HASH")]
     pub api_hash: Option<String>,
+
+    /// TDLib `database_directory` with an existing logged-in session (files go under `<DIR>/tg-proxy-check-files/`).
+    /// When set, MTProto probes may run `getPromoData` after `authorizationStateReady`.
+    #[arg(long, value_name = "DIR")]
+    pub auth_session: Option<PathBuf>,
 }
 
 /// Fully resolved CLI options after env fallback and validation.
@@ -50,6 +56,7 @@ pub struct ResolvedCli {
     pub timeout: Duration,
     pub api_id: i32,
     pub api_hash: String,
+    pub auth_session: Option<PathBuf>,
 }
 
 impl ResolvedCli {
@@ -66,6 +73,12 @@ impl ResolvedCli {
 
         if cli.timeout == 0 {
             return Err(CliError::InvalidTimeout);
+        }
+
+        if let Some(ref p) = cli.auth_session {
+            if !p.is_dir() {
+                return Err(CliError::InvalidAuthSession(p.display().to_string()));
+            }
         }
 
         let api_id = match cli.api_id {
@@ -86,6 +99,7 @@ impl ResolvedCli {
             timeout: Duration::from_secs(cli.timeout),
             api_id,
             api_hash,
+            auth_session: cli.auth_session,
         })
     }
 }

@@ -28,6 +28,9 @@ pub enum CliError {
 
     #[error("invalid API hash: {0}")]
     InvalidApiHash(String),
+
+    #[error("--auth-session must be an existing directory ({0})")]
+    InvalidAuthSession(String),
 }
 
 /// Snapshot when the overall probe deadline is reached (accurate verbose output / debugging).

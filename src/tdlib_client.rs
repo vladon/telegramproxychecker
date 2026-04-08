@@ -12,6 +12,7 @@
 //! (see TDLib `td_json_client.h`). All `td_receive` calls run on the invoking thread; the returned
 //! C string must be copied before the next `td_receive` / `td_execute` on that thread.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,8 @@ pub struct TdlibCredentials {
 pub struct TdlibProbeSettings {
     pub timeout: Duration,
     pub verbose: bool,
+    /// Persistent TDLib database directory for an existing session (`--auth-session`).
+    pub auth_session: Option<PathBuf>,
 }
 
 #[cfg(feature = "tdlib")]

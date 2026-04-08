@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// MTProto sponsored-channel probe result (always included in JSON output).
+/// Sponsored-channel info from TDLib `getPromoData` (JSON always includes this object).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SponsoredStatus {
@@ -34,62 +34,66 @@ impl SponsoredStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SponsoredReport {
     pub status: SponsoredStatus,
-    /// `"tdlib"` when TDLib was used for detection, `"none"` otherwise.
-    pub method: &'static str,
-    /// JSON `null` when unknown or not applicable.
     pub channel_id: Option<i64>,
-    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SubscriptionReport {
+    pub checked: bool,
+    pub joined: Option<bool>,
 }
 
 impl SponsoredReport {
-    pub fn socks5_na() -> Self {
+    pub fn unknown_unchecked() -> Self {
         Self {
             status: SponsoredStatus::Unknown,
-            method: "none",
             channel_id: None,
-            note: Some("not applicable for socks5".into()),
         }
     }
 
-    pub fn yes_tdlib(channel_id: i64, note: impl Into<String>) -> Self {
+    pub fn no_promo() -> Self {
+        Self {
+            status: SponsoredStatus::No,
+            channel_id: None,
+        }
+    }
+
+    pub fn yes_with_peer_id(peer_id: i64) -> Self {
         Self {
             status: SponsoredStatus::Yes,
-            method: "tdlib",
-            channel_id: Some(channel_id),
-            note: Some(note.into()),
+            channel_id: Some(peer_id),
         }
     }
+}
 
-    pub fn unknown_tdlib(note: impl Into<String>) -> Self {
+impl SubscriptionReport {
+    pub const fn unchecked() -> Self {
         Self {
-            status: SponsoredStatus::Unknown,
-            method: "tdlib",
-            channel_id: None,
-            note: Some(note.into()),
+            checked: false,
+            joined: None,
         }
     }
 
-    pub fn unknown_none(note: impl Into<String>) -> Self {
+    pub const fn checked_no_join_info() -> Self {
         Self {
-            status: SponsoredStatus::Unknown,
-            method: "none",
-            channel_id: None,
-            note: Some(note.into()),
+            checked: true,
+            joined: None,
         }
     }
 
-    fn on_probe_failure(proxy: &ProxyConfig, err: &ProbeError) -> Self {
-        match proxy.kind {
-            ProxyKind::Socks5 => Self::socks5_na(),
-            ProxyKind::Mtproto => match err {
-                ProbeError::Timeout(_) => Self::unknown_tdlib("probe timed out before sponsor detection"),
-                ProbeError::TdlibInit(_) => Self::unknown_none(
-                    "TDLib initialization failed; sponsor detection was not run",
-                ),
-                ProbeError::Internal(_) => Self::unknown_none("internal error during probe"),
-            },
+    pub const fn checked_joined(j: bool) -> Self {
+        Self {
+            checked: true,
+            joined: Some(j),
         }
     }
+}
+
+fn default_promo_on_probe_failure() -> (SponsoredReport, SubscriptionReport) {
+    (
+        SponsoredReport::unknown_unchecked(),
+        SubscriptionReport::unchecked(),
+    )
 }
 
 /// Human-facing interpretation of latency or failure mode (verbose).
@@ -148,12 +152,13 @@ pub struct ProbeReport {
     pub wall_duration: Duration,
     pub tdlib_reported_seconds: Option<f64>,
     pub sponsored: SponsoredReport,
+    pub subscription: SubscriptionReport,
 }
 
 impl ProbeReport {
-    pub fn from_probe_failure(err: &ProbeError, proxy: &ProxyConfig) -> Self {
+    pub fn from_probe_failure(err: &ProbeError, _proxy: &ProxyConfig) -> Self {
         let now = wall_ms();
-        let sponsored = SponsoredReport::on_probe_failure(proxy, err);
+        let (sponsored, subscription) = default_promo_on_probe_failure();
         match err {
             ProbeError::Timeout(ctx) => ProbeReport {
                 ok: false,
@@ -167,6 +172,7 @@ impl ProbeReport {
                 wall_duration: ctx.wall_duration,
                 tdlib_reported_seconds: None,
                 sponsored,
+                subscription,
             },
             ProbeError::TdlibInit(s) => ProbeReport {
                 ok: false,
@@ -180,6 +186,7 @@ impl ProbeReport {
                 wall_duration: Duration::ZERO,
                 tdlib_reported_seconds: None,
                 sponsored,
+                subscription,
             },
             ProbeError::Internal(s) => ProbeReport {
                 ok: false,
@@ -193,6 +200,7 @@ impl ProbeReport {
                 wall_duration: Duration::ZERO,
                 tdlib_reported_seconds: None,
                 sponsored,
+                subscription,
             },
         }
     }
@@ -215,6 +223,7 @@ struct JsonOk<'a> {
     latency_ms: u64,
     message: &'static str,
     sponsored: &'a SponsoredReport,
+    subscription: &'a SubscriptionReport,
 }
 
 #[derive(Serialize)]
@@ -226,6 +235,7 @@ struct JsonFail<'a> {
     error: &'a str,
     message: &'static str,
     sponsored: &'a SponsoredReport,
+    subscription: &'a SubscriptionReport,
 }
 
 pub fn render(
@@ -353,16 +363,24 @@ fn render_verbose_text(
     writeln!(w, "interpretation={}", report.interpretation.as_str())?;
     writeln!(
         w,
-        "sponsored_status={} sponsored_method={}",
+        "sponsored_status={} sponsored_channel_id={}",
         report.sponsored.status.as_str(),
-        report.sponsored.method
+        report
+            .sponsored
+            .channel_id
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "null".into())
     )?;
-    if let Some(id) = report.sponsored.channel_id {
-        writeln!(w, "sponsored_channel_id={id}")?;
-    }
-    if let Some(n) = &report.sponsored.note {
-        writeln!(w, "sponsored_note={}", n)?;
-    }
+    writeln!(
+        w,
+        "subscription_checked={} subscription_joined={}",
+        report.subscription.checked,
+        report
+            .subscription
+            .joined
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "null".into())
+    )?;
     render_default_text(proxy, report, w)?;
     Ok(())
 }
@@ -379,6 +397,7 @@ fn render_json(proxy: &ProxyConfig, report: &ProbeReport, w: &mut impl Write) ->
             latency_ms: ms,
             message: "Telegram reachable through proxy",
             sponsored: &report.sponsored,
+            subscription: &report.subscription,
         })
     } else {
         let err = report
@@ -393,6 +412,7 @@ fn render_json(proxy: &ProxyConfig, report: &ProbeReport, w: &mut impl Write) ->
             error: err,
             message: "Telegram unreachable through proxy",
             sponsored: &report.sponsored,
+            subscription: &report.subscription,
         })
     }
     .map_err(io::Error::other)?;
@@ -461,7 +481,8 @@ mod tests {
             probe_end_wall_ms: 0,
             wall_duration: Duration::ZERO,
             tdlib_reported_seconds: Some(0.042),
-            sponsored: SponsoredReport::socks5_na(),
+            sponsored: SponsoredReport::unknown_unchecked(),
+            subscription: SubscriptionReport::unchecked(),
         };
         let mut buf = Vec::new();
         render_default_text(&proxy, &ok_rep, &mut buf).unwrap();
@@ -482,7 +503,8 @@ mod tests {
             probe_end_wall_ms: 0,
             wall_duration: Duration::ZERO,
             tdlib_reported_seconds: None,
-            sponsored: SponsoredReport::socks5_na(),
+            sponsored: SponsoredReport::unknown_unchecked(),
+            subscription: SubscriptionReport::unchecked(),
         };
         let mut buf = Vec::new();
         render_default_text(&proxy, &fail_rep, &mut buf).unwrap();
@@ -492,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn json_includes_sponsored_object() {
+    fn json_includes_sponsored_and_subscription() {
         let proxy = ProxyConfig {
             original_input: String::new(),
             kind: ProxyKind::Mtproto,
@@ -513,7 +535,8 @@ mod tests {
             probe_end_wall_ms: 0,
             wall_duration: Duration::ZERO,
             tdlib_reported_seconds: Some(0.32),
-            sponsored: SponsoredReport::yes_tdlib(123456789_i64, "promo peer detected"),
+            sponsored: SponsoredReport::yes_with_peer_id(123456789_i64),
+            subscription: SubscriptionReport::checked_joined(true),
         };
         let mut buf = Vec::new();
         render_json(
@@ -525,9 +548,9 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
         assert_eq!(v["sponsored"]["status"], "yes");
-        assert_eq!(v["sponsored"]["method"], "tdlib");
         assert_eq!(v["sponsored"]["channel_id"], 123456789);
-        assert_eq!(v["sponsored"]["note"], "promo peer detected");
+        assert_eq!(v["subscription"]["checked"], true);
+        assert_eq!(v["subscription"]["joined"], true);
     }
 
     #[test]
@@ -552,7 +575,8 @@ mod tests {
             probe_end_wall_ms: 20,
             wall_duration: Duration::from_millis(5),
             tdlib_reported_seconds: Some(0.001),
-            sponsored: SponsoredReport::socks5_na(),
+            sponsored: SponsoredReport::unknown_unchecked(),
+            subscription: SubscriptionReport::unchecked(),
         };
         let opts = RenderOpts {
             verbose: true,

@@ -39,6 +39,7 @@ pub fn run() -> ExitCode {
     let td_settings = TdlibProbeSettings {
         timeout: resolved.timeout,
         verbose: resolved.verbose,
+        auth_session: resolved.auth_session.clone(),
     };
 
     let report = match probe_proxy(&proxy, &creds, &td_settings) {

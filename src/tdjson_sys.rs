@@ -11,6 +11,9 @@ extern "C" {
     fn td_create_client_id() -> libc::c_int;
     fn td_send(client_id: libc::c_int, request: *const libc::c_char);
     fn td_receive(timeout: libc::c_double) -> *const libc::c_char;
+    /// Synchronous TDLib request. The returned pointer is valid only until the next `td_execute` or
+    /// `td_receive` on this thread; do not `free` it (TDLib owns the buffer).
+    fn td_execute(request: *const libc::c_char) -> *const libc::c_char;
     fn td_set_log_message_callback(
         max_verbosity_level: libc::c_int,
         callback: Option<extern "C" fn(libc::c_int, *const libc::c_char)>,
@@ -49,4 +52,13 @@ pub(crate) fn set_log_callback(
     unsafe {
         td_set_log_message_callback(max_verbosity, cb);
     }
+}
+
+/// Run a synchronous TDLib JSON request (e.g. `setLogStream`). Ignores the response body.
+pub(crate) fn execute_sync(request: &str) -> Result<(), std::ffi::NulError> {
+    let c = CString::new(request.as_bytes())?;
+    unsafe {
+        let _ = td_execute(c.as_ptr());
+    }
+    Ok(())
 }

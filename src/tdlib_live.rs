@@ -144,6 +144,16 @@ pub fn probe_proxy(
     let start_instant = Instant::now();
     let deadline = start_instant + settings.timeout;
 
+    // TDLib defaults to a stderr log stream; clearing the Rust callback alone does not silence it.
+    // `logStreamEmpty` stops default file/stderr output; verbosity controls what reaches the callback.
+    tdjson_sys::execute_sync(r#"{"@type":"setLogStream","log_stream":{"@type":"logStreamEmpty"}}"#)
+        .map_err(|e| ProbeError::Internal(format!("td_execute setLogStream: {e}")))?;
+    let verbosity = if settings.verbose { 3 } else { 0 };
+    tdjson_sys::execute_sync(&format!(
+        r#"{{"@type":"setLogVerbosityLevel","new_verbosity_level":{verbosity}}}"#
+    ))
+    .map_err(|e| ProbeError::Internal(format!("td_execute setLogVerbosityLevel: {e}")))?;
+
     let mut log_callback_guard = LogCallbackGuard {
         clear_on_drop: false,
     };
@@ -152,7 +162,8 @@ pub fn probe_proxy(
         if let Ok(mut g) = TD_LOG_LINES.try_lock() {
             g.clear();
         }
-        tdjson_sys::set_log_callback(2, Some(td_log_cb));
+        // Match or exceed typical TDLib diagnostic lines (often tagged as verbosity 3).
+        tdjson_sys::set_log_callback(4, Some(td_log_cb));
         log_callback_guard.clear_on_drop = true;
     } else {
         tdjson_sys::set_log_callback(0, None);

@@ -104,9 +104,10 @@ Pinned revision: **[`v1.8.0`](https://github.com/tdlib/td/tree/v1.8.0)** (commit
 
 | Stage | Location (under `target/.../build/tg-proxy-check-<hash>/out/`) |
 |--------|------------------------------------------------------------------|
-| CMake build tree | `tdlib-cmake/build/` |
-| `cmake --install` prefix | `tdlib-install/` (libraries in `tdlib-install/lib/`) |
-| Tarball extract (if used) | `td-src/td-<commit>/` |
+| Per-variant CMake + install | `td-artifacts/<variant-id>/tdlib-cmake/` and `td-artifacts/<variant-id>/tdlib-install/lib/` |
+| Tarball extract (if used) | `td-src/td-<commit>/` (shared source; only **build trees** are per-variant) |
+
+Set **`TDLIB_BUILD_VARIANT`** to a unique label for each release row (see [Release build matrix](#release-build-matrix-linux-x86_64)) so **gnu vs musl**, **generic vs x86-64-v3**, and **static vs shared tdjson** never reuse the same CMake output. If `TDLIB_BUILD_VARIANT` is unset, the id is `default`. If it is `default` but **`CARGO_ENCODED_RUSTFLAGS`** is non-empty (e.g. `-C target-cpu=x86-64-v3`), the directory name includes a short hash so two builds on the same target triple do not collide.
 
 Nothing in this flow writes under `third_party/` except your own git submodule checkout.
 
@@ -122,7 +123,8 @@ Nothing in this flow writes under `third_party/` except your own git submodule c
 |----------|-----------|
 | **Linux** (glibc, default) | Static chain: `libtdjson_static.a` + other TDLib `libtd*.a` inside `-Wl,--start-group` / `--end-group`, then dynamic **OpenSSL**, **zlib**, optional **zstd** (if TDLib was built with zstd), **dl**, **pthread**, **libstdc++**. |
 | **macOS** (default) | Same static `.a` list, linked with **`-Wl,-force_load,…`** per archive (macOS `ld` has no `--start-group`), then **ssl/crypto/z** and **`libc++`**. |
-| **Linux musl** | **Shared** `libtdjson.so` from the same install prefix + **rpath** to that directory (static `libstdc++/OpenSSL` pairing on musl is not the default here). |
+| **Linux musl** (default variant) | **Shared** `libtdjson.so` from the same install prefix + **rpath** to that directory. |
+| **Linux musl** + variant name containing **`musl-static`** or **`musl-v3-static`** | Static TDLib `.a` chain (same as GNU), plus **`static=stdc++`**. Set **`TDLIB_LINK_SSL_STATIC=1`** (and usually **`OPENSSL_STATIC=1`** with static OpenSSL `.a` on the link path) if you need OpenSSL linked statically as well. |
 | **Windows** | **Shared** `tdjson`; import library from `tdlib-install/lib`; **`tdjson.dll`** is copied into `target/<debug\|release>/` for `cargo run`. |
 
 Optional: **`TDLIB_LINK_SHARED=1`** on glibc Linux forces the **local shared** `libtdjson.so` + rpath instead of the static `.a` chain (debugging or unusual link environments).
@@ -135,7 +137,9 @@ Rust FFI lives in `src/tdjson_sys.rs`; symbols are resolved from the paths above
 
 ### Verbose TDLib logs
 
-With `--verbose`, internal TDLib log lines are printed. Lines that appear to mention `password`, `secret`, `api_hash`, `proxytype`, or `token` are replaced with a placeholder to reduce accidental credential leakage; this is heuristic and not a cryptographic guarantee.
+Without `--verbose`, TDLib’s default log stream is disabled (`setLogStream` → `logStreamEmpty`) and the global verbosity is set to **0**, so you should **not** see internal TDLib lines on stderr—only the tool’s own `OK` / `FAIL` line or JSON on stdout.
+
+With `--verbose`, log lines are captured via `td_set_log_message_callback` and printed in the verbose report (with redaction heuristics). Lines that appear to mention `password`, `secret`, `api_hash`, `proxytype`, or `token` are replaced with a placeholder to reduce accidental credential leakage; this is heuristic and not a cryptographic guarantee.
 
 ## Native prerequisites
 
@@ -162,7 +166,34 @@ Use a **`third_party/td`** submodule to avoid network fetch during builds.
 cargo build --release
 ```
 
-The first build compiles TDLib and can take **several minutes** and several GB under `target/`. Later `cargo build` runs are incremental (CMake + Ninja/Make reuse the tree under `out/tdlib-cmake/build` until the source path or options change).
+The first build compiles TDLib and can take **several minutes** and several GB under `target/`. Later `cargo build` runs are incremental (CMake + Ninja/Make reuse the tree under `out/td-artifacts/<variant>/tdlib-cmake/build` until the source path, **`TDLIB_BUILD_VARIANT`**, or relevant env vars change).
+
+### Release build matrix (Linux x86_64)
+
+One-shot (requires **`x86_64-unknown-linux-gnu`** and **`x86_64-unknown-linux-musl`** targets, plus musl-capable linker for musl rows):
+
+```bash
+make release-all
+# or:
+./scripts/build-release.sh
+```
+
+Artifacts land in **`dist/`**:
+
+| Make target | Output binary | Notes |
+|-------------|---------------|--------|
+| `build-gnu` | `tg-proxy-check-linux-x86_64-gnu` | glibc, generic x86-64 |
+| `build-musl` | `tg-proxy-check-linux-x86_64-musl` | musl + shared `libtdjson.so`; `dist/libtdjson-linux-x86_64-musl.so` copied for shipping |
+| `build-gnu-v3` | `tg-proxy-check-linux-x86_64-gnu-v3` | **`RUSTFLAGS=-C target-cpu=x86-64-v3`** (needs CPU with v3 features at runtime) |
+| `build-musl-v3` | `tg-proxy-check-linux-x86_64-musl-v3` | musl + v3 + shared tdjson |
+| `build-musl-static` | `tg-proxy-check-linux-x86_64-musl-static` | **`+crt-static`** Rust; static TDLib; **`scripts/verify-static.sh`** ensures **no dynamic `libtdjson`** |
+| `build-musl-v3-static` | `tg-proxy-check-linux-x86_64-musl-v3-static` | v3 + static tdjson + verification |
+
+Per-variant: `make build-gnu`, `make build-musl`, etc.
+
+**Fully static** musl binaries (no other DSOs) are toolchain-dependent: enable **`TDLIB_LINK_SSL_STATIC=1`** and **`OPENSSL_STATIC=1`** when your environment provides static OpenSSL. The verification script always rejects a **dynamic `libtdjson`** on “static” matrix rows.
+
+If you use **[just](https://github.com/casey/just)**, `just release-all` runs the same `make` target (see `justfile` in the repo root).
 
 **Parser-only (no CMake / no TDLib compile):**
 
@@ -252,6 +283,6 @@ cargo clippy --all-targets -- -D warnings
 
 ## Design note (FFI)
 
-- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → `OUT_DIR/tdlib-install`). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles `pingProxy` / authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
+- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → `OUT_DIR/td-artifacts/<variant>/tdlib-install`). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles `pingProxy` / authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
 - **Pinned version:** Upstream tag **`v1.8.0`** (commit `b3ab664a18f8611f4dfcd3054717504271eeaa7a`); bump `TD_COMMIT` / `TD_TARBALL_SHA256` / submodule instructions together when upgrading.
 - **Caveats:** All `td_receive` calls run on **one thread**; the pointer returned by `td_receive` is only valid until the next `td_receive` / `td_execute` on that thread—this implementation copies the string immediately. Temporary TDLib database directories are created under the system temp folder per run. Every exit path after `td_create_client_id` runs `close` and clears the log callback so the next probe in-process does not inherit state. Timeouts carry a `ProbeTimeoutContext` so verbose output still shows elapsed time and authorization states reached.

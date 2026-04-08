@@ -3,12 +3,20 @@
 //! Sources: `third_party/td` when `CMakeLists.txt` exists; otherwise a pinned tarball
 //! into `OUT_DIR` (SHA-256 verified). Nothing is installed system-wide.
 //!
-//! CMake runs in `OUT_DIR/tdlib-cmake/build`; install prefix is `OUT_DIR/tdlib-install`.
-//! The `install` target builds everything that packaging needs (including `tdjson` + `tdjson_static`).
+//! ## Isolated native builds per variant
 //!
-//! Linking (all artifacts are under `OUT_DIR/tdlib-install/lib`, never `/usr/lib`):
-//! - **Unix (Linux GNU, macOS):** static `.a` chain for TDLib, system OpenSSL/zlib (+ optional zstd), C++ runtime.
-//! - **Linux musl / forced shared / Windows:** locally built `tdjson` shared library + rpath or DLL copy.
+//! CMake output lives under `OUT_DIR/td-artifacts/<variant-id>/` so **gnu vs musl**, **v3 RUSTFLAGS**,
+//! and **static vs dynamic** never reuse the same object tree. Set **`TDLIB_BUILD_VARIANT`** for each
+//! release matrix row (see `Makefile`). If unset, the id is `default`; if `default` but
+//! **`CARGO_ENCODED_RUSTFLAGS`** is non-empty, a short hash is appended so `-C target-cpu=x86-64-v3`
+//! does not collide with a generic CPU build sharing the same Cargo `OUT_DIR`.
+//!
+//! Linking (artifacts under `td-artifacts/.../tdlib-install/lib`, never `/usr/lib`):
+//! - **Linux GNU / macOS:** static `.a` TDLib chain + system crypto/zlib (+ optional zstd) + C++ runtime.
+//! - **Linux musl (normal):** locally built **`libtdjson.so`** + rpath (avoids libstdc++/glibc static pain).
+//! - **Linux musl + variant `*musl-static*`:** static TDLib `.a` chain; optional **`TDLIB_LINK_SSL_STATIC=1`**
+//!   with **`OPENSSL_STATIC=1`** for fully static binaries when your toolchain provides static OpenSSL.
+//! - **Windows / `TDLIB_LINK_SHARED=1`:** shared `tdjson` + DLL copy / rpath as before.
 
 use cmake::Config;
 use sha2::{Digest, Sha256};
@@ -42,6 +50,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TDLIB");
     println!("cargo:rerun-if-env-changed=OPENSSL_ROOT_DIR");
     println!("cargo:rerun-if-env-changed=TDLIB_LINK_SHARED");
+    println!("cargo:rerun-if-env-changed=TDLIB_LINK_SSL_STATIC");
+    println!("cargo:rerun-if-env-changed=TDLIB_BUILD_VARIANT");
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CMAKE");
     println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
 
@@ -58,15 +69,23 @@ fn main() {
         td_src.join("CMakeLists.txt").display()
     );
 
-    let install_dir = out_dir.join("tdlib-install");
+    let artifact_root = td_artifact_root(&out_dir);
+    fs::create_dir_all(&artifact_root).expect("create td artifact root");
+
+    let install_dir = artifact_root.join("tdlib-install");
     fs::create_dir_all(&install_dir).expect("create tdlib install dir");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     let msvc = target_env == "msvc";
 
+    let variant_raw = env::var("TDLIB_BUILD_VARIANT").unwrap_or_else(|_| "default".into());
+    let v = variant_raw.to_ascii_lowercase();
+    let musl_static_tdlib = target_env == "musl"
+        && (v.contains("musl-static") || v.contains("musl-v3-static"));
+
     let mut cfg = Config::new(&td_src);
-    cfg.out_dir(out_dir.join("tdlib-cmake"))
+    cfg.out_dir(artifact_root.join("tdlib-cmake"))
         .profile("Release")
         .define(
             "CMAKE_INSTALL_PREFIX",
@@ -102,20 +121,60 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
 
     let force_shared = env::var("TDLIB_LINK_SHARED").as_deref() == Ok("1");
-    let use_shared = target_os == "windows" || force_shared || target_env == "musl";
+    let use_shared =
+        target_os == "windows" || force_shared || (target_env == "musl" && !musl_static_tdlib);
 
     if use_shared {
         link_local_shared(&lib_dir, &target_os);
     } else if target_os == "macos" {
         link_unix_static_apple(&lib_dir);
-        link_system_crypto_z(&lib_dir, &target_os);
+        link_system_crypto_z(&lib_dir, &target_os, false);
         println!("cargo:rustc-link-lib=c++");
-    } else {
-        // Linux and other non-macOS Unix (BSD, etc.): GNU ld / lld style groups.
+    } else if musl_static_tdlib {
         link_unix_static_gnu(&lib_dir);
-        link_system_crypto_z(&lib_dir, &target_os);
+        link_system_crypto_z(&lib_dir, &target_os, ssl_static_enabled());
+        println!("cargo:rustc-link-lib=static=stdc++");
+    } else {
+        // Linux GNU and other non-macOS Unix (BSD, etc.): GNU ld / lld style groups.
+        link_unix_static_gnu(&lib_dir);
+        link_system_crypto_z(&lib_dir, &target_os, false);
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
+}
+
+/// Separate CMake/install trees per release variant (and per distinct RUSTFLAGS when variant is default).
+fn td_artifact_root(out_dir: &Path) -> PathBuf {
+    let base = env::var("TDLIB_BUILD_VARIANT").unwrap_or_else(|_| "default".into());
+    let safe = sanitize_variant(&base);
+    let rf = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    let segment = if safe == "default" && !rf.is_empty() {
+        let h = Sha256::digest(rf.as_bytes());
+        let hex: String = h.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        format!("default_{hex}")
+    } else {
+        safe
+    };
+    out_dir.join("td-artifacts").join(segment)
+}
+
+fn sanitize_variant(s: &str) -> String {
+    let t = s.trim();
+    if t.is_empty() {
+        return "default".into();
+    }
+    t.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn ssl_static_enabled() -> bool {
+    env::var("TDLIB_LINK_SSL_STATIC").as_deref() == Ok("1")
 }
 
 fn resolve_td_source(manifest_dir: &Path, out_dir: &Path) -> PathBuf {
@@ -254,12 +313,22 @@ fn link_unix_static_apple(lib_dir: &Path) {
     }
 }
 
-fn link_system_crypto_z(lib_dir: &Path, target_os: &str) {
-    println!("cargo:rustc-link-lib=dylib=ssl");
-    println!("cargo:rustc-link-lib=dylib=crypto");
-    println!("cargo:rustc-link-lib=dylib=z");
+fn link_system_crypto_z(lib_dir: &Path, target_os: &str, static_ssl: bool) {
+    if static_ssl {
+        println!("cargo:rustc-link-lib=static=ssl");
+        println!("cargo:rustc-link-lib=static=crypto");
+        println!("cargo:rustc-link-lib=static=z");
+    } else {
+        println!("cargo:rustc-link-lib=dylib=ssl");
+        println!("cargo:rustc-link-lib=dylib=crypto");
+        println!("cargo:rustc-link-lib=dylib=z");
+    }
     if tdlib_built_with_zstd(lib_dir) {
-        println!("cargo:rustc-link-lib=dylib=zstd");
+        if static_ssl {
+            println!("cargo:rustc-link-lib=static=zstd");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=zstd");
+        }
     }
     match target_os {
         "linux" => {

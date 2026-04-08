@@ -8,9 +8,9 @@
 //! ## API
 //!
 //! With the `tdlib` Cargo feature enabled, this crate uses the multiplexed interface:
-//! `td_create_client_id`, `td_send`, `td_receive` (see TDLib `td_json_client.h`). All
-//! `td_receive` calls run on the invoking thread; the returned C string must be copied before
-//! the next `td_receive` / `td_execute` on that thread.
+//! `td_create_client_id`, `td_send`, `td_receive`, and synchronous `td_execute` for log setup
+//! (see TDLib `td_json_client.h`). All `td_receive` calls run on the invoking thread; the returned
+//! C string must be copied before the next `td_receive` / `td_execute` on that thread.
 
 use std::time::Duration;
 

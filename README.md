@@ -154,7 +154,7 @@ You need a normal **native toolchain**; nothing from TDLib has to be pre-install
 
 | Prerequisite | Notes |
 |--------------|--------|
-| **Rust** | Stable toolchain, `cargo`. |
+| **Rust** | **1.94.1** (see repo root `rust-toolchain.toml`), `cargo`. |
 | **C++ compiler** | GCC or Clang on Linux/macOS; **MSVC** or MinGW on Windows. |
 | **CMake** | 3.10+ (TDLib warns on older minimums). On `PATH`. |
 | **OpenSSL** | Dev package with headers + libraries (`libssl-dev`, Homebrew `openssl`, etc.). On Windows, set **`OPENSSL_ROOT_DIR`** if CMake cannot find OpenSSL. |

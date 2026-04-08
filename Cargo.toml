@@ -2,6 +2,7 @@
 name = "tg-proxy-check"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.1"
 description = "Check Telegram reachability through MTProto or SOCKS5 proxies using TDLib pingProxy"
 license = "MIT"
 readme = "README.md"

@@ -30,11 +30,21 @@ pub enum CliError {
     InvalidApiHash(String),
 }
 
+/// Snapshot when the overall probe deadline is reached (accurate verbose output / debugging).
+#[derive(Debug, Clone)]
+pub struct ProbeTimeoutContext {
+    pub probe_start_wall_ms: u128,
+    pub probe_end_wall_ms: u128,
+    pub wall_duration: std::time::Duration,
+    pub auth_states_seen: Vec<String>,
+    pub tdlib_log_lines: Vec<String>,
+}
+
 /// TDLib / probe failures after a proxy link was parsed successfully.
 #[derive(Debug, Error)]
 pub enum ProbeError {
     #[error("probe timed out")]
-    Timeout,
+    Timeout(ProbeTimeoutContext),
 
     #[error("TDLib initialization failed: {0}")]
     TdlibInit(String),
@@ -78,7 +88,7 @@ impl From<RunError> for ExitCode {
         match e {
             RunError::Cli(_) | RunError::Parse(_) => ExitCode::InvalidInput,
             RunError::Probe(p) => match p {
-                ProbeError::Timeout => ExitCode::Timeout,
+                ProbeError::Timeout(_) => ExitCode::Timeout,
                 ProbeError::TdlibInit(_) => ExitCode::TdlibInit,
                 ProbeError::Internal(_) => ExitCode::Internal,
             },

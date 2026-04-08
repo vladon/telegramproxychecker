@@ -38,7 +38,10 @@ pub enum ParseError {
     #[error("missing or empty server parameter")]
     MissingServer,
 
-    #[error("missing or invalid port (must be 1–65535)")]
+    #[error("missing or empty port parameter")]
+    MissingPort,
+
+    #[error("invalid port (must be 1–65535)")]
     InvalidPort,
 
     #[error("MTProto proxy requires a non-empty secret")]
@@ -65,7 +68,10 @@ pub fn parse_proxy_link(input: &str) -> Result<ProxyConfig, ParseError> {
         .filter(|s| !s.is_empty())
         .ok_or(ParseError::MissingServer)?;
 
-    let port_str = pairs.get("port").map(String::as_str).unwrap_or("");
+    let port_str = match pairs.get("port").map(String::as_str) {
+        None | Some("") => return Err(ParseError::MissingPort),
+        Some(s) => s,
+    };
     let port: u16 = port_str.parse().map_err(|_| ParseError::InvalidPort)?;
     if port == 0 {
         return Err(ParseError::InvalidPort);
@@ -141,4 +147,30 @@ fn query_pairs_map(url: &Url) -> HashMap<String, String> {
             acc.insert(k, v);
             acc
         })
+}
+
+/// Rebuilds the link query with `secret` and `pass` values replaced so verbose logs never echo raw credentials.
+/// The full secret remains only in memory inside [`ProxyConfig`] for TDLib requests (not printed).
+pub fn redact_sensitive_query_in_link(input: &str) -> String {
+    let Ok(mut url) = Url::parse(input.trim()) else {
+        return "<could not parse link for display>".to_string();
+    };
+    if url.query().is_none() {
+        return url.to_string();
+    }
+    let mut ser = url.query_pairs().fold(
+        url::form_urlencoded::Serializer::new(String::new()),
+        |mut ser, (k, v)| {
+            let v_out = if k.eq_ignore_ascii_case("secret") || k.eq_ignore_ascii_case("pass") {
+                "<redacted>"
+            } else {
+                v.as_ref()
+            };
+            ser.append_pair(k.as_ref(), v_out);
+            ser
+        },
+    );
+    let q = ser.finish();
+    url.set_query(Some(&q));
+    url.to_string()
 }

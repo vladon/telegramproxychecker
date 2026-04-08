@@ -1,6 +1,8 @@
 //! Integration tests for proxy link parsing (no TDLib).
 
-use tg_proxy_check::proxy_link::{parse_proxy_link, ParseError, ProxyKind};
+use tg_proxy_check::proxy_link::{
+    parse_proxy_link, redact_sensitive_query_in_link, ParseError, ProxyKind,
+};
 
 #[test]
 fn valid_mtproto_tg_proxy() {
@@ -47,6 +49,14 @@ fn valid_socks5_tg_with_auth() {
 }
 
 #[test]
+fn missing_port_parameter() {
+    let r = parse_proxy_link("tg://proxy?server=1.2.3.4&secret=ab");
+    assert_eq!(r, Err(ParseError::MissingPort));
+    let r = parse_proxy_link("tg://proxy?server=1.2.3.4&port=&secret=ab");
+    assert_eq!(r, Err(ParseError::MissingPort));
+}
+
+#[test]
 fn invalid_port() {
     let r = parse_proxy_link("tg://proxy?server=1.2.3.4&port=0&secret=ab");
     assert_eq!(r, Err(ParseError::InvalidPort));
@@ -88,4 +98,25 @@ fn http_t_me_socks() {
     let c = parse_proxy_link(s).unwrap();
     assert_eq!(c.kind, ProxyKind::Socks5);
     assert_eq!(c.server, "z");
+}
+
+#[test]
+fn telegram_me_host_mtproto() {
+    let s = "https://telegram.me/proxy?server=a.b.c&port=443&secret=abc";
+    let c = parse_proxy_link(s).unwrap();
+    assert_eq!(c.kind, ProxyKind::Mtproto);
+    assert_eq!(c.server, "a.b.c");
+}
+
+#[test]
+fn redact_sensitive_query_for_verbose_display() {
+    let raw = "tg://socks?server=x&port=1080&user=u&pass=secretpass";
+    let redacted = redact_sensitive_query_in_link(raw);
+    assert!(!redacted.contains("secretpass"));
+    assert!(redacted.to_ascii_lowercase().contains("redacted"));
+
+    let raw_mt = "tg://proxy?server=x&port=443&secret=supersecret";
+    let red_mt = redact_sensitive_query_in_link(raw_mt);
+    assert!(!red_mt.contains("supersecret"));
+    assert!(red_mt.to_ascii_lowercase().contains("redacted"));
 }

@@ -1,5 +1,11 @@
+//! TDLib multiplexed JSON client: `td_create_client_id` / `td_send` / `td_receive`.
+//!
+//! `pingProxy` is sent once TDLib reports `authorizationStateWaitPhoneNumber`, or immediately
+//! after a successful `checkDatabaseEncryptionKey` response (`ok`) so encrypted databases still
+//! reach a ping-capable state without a phone login.
+
 use super::{TdlibCredentials, TdlibProbeSettings};
-use crate::error::ProbeError;
+use crate::error::{ProbeError, ProbeTimeoutContext};
 use crate::output::{success_interpretation, wall_ms, Interpretation, ProbeReport};
 use crate::proxy_link::{ProxyConfig, ProxyKind};
 use serde_json::{json, Value};
@@ -56,6 +62,8 @@ fn receive_json(timeout: Duration) -> Option<String> {
     }
 }
 
+/// Sends a JSON request. TDLib copies the buffer before `td_send` returns; the `CString` only
+/// needs to stay alive for the duration of this call (see upstream `td_send` contract).
 fn send_raw(client_id: i32, json: &str) -> Result<(), ProbeError> {
     let c = CString::new(json.as_bytes())
         .map_err(|e| ProbeError::Internal(format!("request contains interior nul: {e}")))?;
@@ -64,6 +72,7 @@ fn send_raw(client_id: i32, json: &str) -> Result<(), ProbeError> {
     }
     Ok(())
 }
+
 
 fn client_matches(v: &Value, client_id: i32) -> bool {
     match v.get("@client_id") {
@@ -140,13 +149,21 @@ pub fn probe_proxy(
     let extra_auth = next_extra("getAuthorizationState");
     let get_auth = json!({
         "@type": "getAuthorizationState",
-        "@extra": extra_auth,
+        "@extra": extra_auth.clone(),
     });
-    send_raw(
-        client_id,
-        &serde_json::to_string(&get_auth)
-            .map_err(|e| ProbeError::Internal(format!("serialize getAuthorizationState: {e}")))?,
-    )?;
+    let get_auth_s = match serde_json::to_string(&get_auth) {
+        Ok(s) => s,
+        Err(e) => {
+            td_shutdown_session(client_id);
+            return Err(ProbeError::Internal(format!(
+                "serialize getAuthorizationState: {e}"
+            )));
+        }
+    };
+    if let Err(e) = send_raw(client_id, &get_auth_s) {
+        td_shutdown_session(client_id);
+        return Err(e);
+    }
 
     while Instant::now() < deadline && ping_result.is_none() {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -154,8 +171,15 @@ pub fn probe_proxy(
         let Some(line) = receive_json(slice) else {
             continue;
         };
-        let v: Value = serde_json::from_str(&line)
-            .map_err(|e| ProbeError::Internal(format!("invalid JSON from td_receive: {e}")))?;
+        let v: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                td_shutdown_session(client_id);
+                return Err(ProbeError::Internal(format!(
+                    "invalid JSON from td_receive: {e}"
+                )));
+            }
+        };
 
         if !client_matches(&v, client_id) {
             continue;
@@ -169,7 +193,7 @@ pub fn probe_proxy(
             "updateAuthorizationState" => {
                 if let Some(st) = auth_state_from_update(&v) {
                     push_unique(&mut auth_states_seen, &st);
-                    handle_auth_state(
+                    if let Err(e) = handle_auth_state(
                         client_id,
                         proxy,
                         creds,
@@ -180,12 +204,15 @@ pub fn probe_proxy(
                         &mut check_key_sent,
                         &mut ping_extra,
                         &mut ping_result,
-                    )?;
+                    ) {
+                        td_shutdown_session(client_id);
+                        return Err(e);
+                    }
                 }
             }
             t if t.starts_with("authorizationState") => {
                 push_unique(&mut auth_states_seen, t);
-                handle_auth_state(
+                if let Err(e) = handle_auth_state(
                     client_id,
                     proxy,
                     creds,
@@ -196,7 +223,10 @@ pub fn probe_proxy(
                     &mut check_key_sent,
                     &mut ping_extra,
                     &mut ping_result,
-                )?;
+                ) {
+                    td_shutdown_session(client_id);
+                    return Err(e);
+                }
             }
             "error" => {
                 let extra = v.get("@extra").and_then(|e| e.as_str()).unwrap_or("");
@@ -205,6 +235,10 @@ pub fn probe_proxy(
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown TDLib error")
                     .to_string();
+                if extra == extra_auth.as_str() {
+                    td_shutdown_session(client_id);
+                    return Err(ProbeError::TdlibInit(msg));
+                }
                 if let Some(pe) = ping_extra.as_deref() {
                     if extra == pe {
                         ping_result = Some(Err(msg));
@@ -212,24 +246,34 @@ pub fn probe_proxy(
                     }
                 }
                 if extra.starts_with("setTdlibParameters-") {
+                    td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
                 }
                 if extra.starts_with("checkDatabaseEncryptionKey-") {
+                    td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
                 }
             }
             "ok" => {
                 let extra = v.get("@extra").and_then(|e| e.as_str()).unwrap_or("");
                 if extra.starts_with("checkDatabaseEncryptionKey-") {
-                    try_send_ping(client_id, proxy, &mut ping_extra, &mut ping_result)?;
+                    if let Err(e) =
+                        try_send_ping(client_id, proxy, &mut ping_extra, &mut ping_result)
+                    {
+                        td_shutdown_session(client_id);
+                        return Err(e);
+                    }
                 }
             }
             "seconds" => {
                 let extra = v.get("@extra").and_then(|e| e.as_str()).unwrap_or("");
                 if Some(extra) == ping_extra.as_deref() {
-                    let sec = v.get("seconds").and_then(|s| s.as_f64()).ok_or_else(|| {
-                        ProbeError::Internal("pingProxy response missing seconds".into())
-                    })?;
+                    let Some(sec) = v.get("seconds").and_then(|s| s.as_f64()) else {
+                        td_shutdown_session(client_id);
+                        return Err(ProbeError::Internal(
+                            "pingProxy response missing seconds".into(),
+                        ));
+                    };
                     ping_result = Some(Ok(sec));
                     break;
                 }
@@ -238,14 +282,19 @@ pub fn probe_proxy(
         }
     }
 
-    let _ = send_close(client_id);
-
     let end_wall = wall_ms();
     let wall_duration = start_instant.elapsed();
     let tdlib_log = copy_log_lines();
+    td_shutdown_session(client_id);
 
     let Some(pr) = ping_result else {
-        return Err(ProbeError::Timeout);
+        return Err(ProbeError::Timeout(ProbeTimeoutContext {
+            probe_start_wall_ms: start_wall,
+            probe_end_wall_ms: end_wall,
+            wall_duration,
+            auth_states_seen,
+            tdlib_log_lines: tdlib_log,
+        }));
     };
 
     match pr {
@@ -268,7 +317,7 @@ pub fn probe_proxy(
         Err(msg) => Ok(ProbeReport {
             ok: false,
             latency_ms: None,
-            error_message: Some(msg.clone()),
+            error_message: Some(msg),
             interpretation: Interpretation::ProxyReachableTelegramUnavailable,
             auth_states_seen,
             tdlib_log_lines: tdlib_log,
@@ -376,6 +425,14 @@ fn send_close(client_id: i32) -> Result<(), ProbeError> {
         }
     }
     Ok(())
+}
+
+/// Close the TDLib client and detach our log callback so a future probe in the same process starts clean.
+fn td_shutdown_session(client_id: i32) {
+    let _ = send_close(client_id);
+    unsafe {
+        td_set_log_message_callback(0, None);
+    }
 }
 
 fn path_to_tdlib_string(p: &std::path::Path) -> String {

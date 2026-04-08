@@ -6,7 +6,7 @@ pub mod output;
 pub mod proxy_link;
 pub mod tdlib_client;
 
-pub use error::{CliError, ExitCode, ProbeError, RunError};
+pub use error::{CliError, ExitCode, ProbeError, ProbeTimeoutContext, RunError};
 
 use crate::cli::ResolvedCli;
 use crate::output::{ProbeReport, RenderOpts};

@@ -24,7 +24,7 @@ The same forms work with host `telegram.me` instead of `t.me`.
 - `tg://socks?server=HOST&port=PORT&user=USER&pass=PASS`
 - `https://t.me/socks?...` and `http://t.me/socks?...` (with optional `user` / `pass`)
 
-Query parameters are URL-decoded. The tool keeps your original input string for `--verbose` output.
+Query parameters are URL-decoded. For `--verbose` text output, `input_link=` shows a **redacted** copy of the URL (`secret` and `pass` query values replaced) so MTProto secrets and SOCKS passwords are not written to the terminal. The in-memory parsed configuration still holds the real values for TDLib only.
 
 ## Usage
 
@@ -41,7 +41,7 @@ tg-proxy-check --proxy-link 'https://t.me/socks?server=1.2.3.4&port=1080'
 | Flag | Meaning |
 |------|--------|
 | `--proxy-link URL` | Same as positional link; **do not** pass both. |
-| `--verbose` | Extra diagnostics (no full MTProto secret or SOCKS password). |
+| `--verbose` | Extra diagnostics; sensitive query params redacted in `input_link=`; see note on TDLib logs below. |
 | `--json` | Single-line JSON on stdout. |
 | `--timeout SECONDS` | Wall-clock limit for the whole probe (default: 60). |
 | `--api-id` / `--api-hash` | Override `TG_API_ID` / `TG_API_HASH`. |
@@ -86,6 +86,14 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 | 5 | Internal / unexpected error. |
 
 ## TDLib dependency (dynamic linking)
+
+### `td_send` and memory safety
+
+`td_send` is called with a nul-terminated JSON buffer. Per TDLib’s contract, the library **copies** that string before returning from `td_send`, so it is safe for the Rust `CString` to be dropped immediately after the call (as in this codebase).
+
+### Verbose TDLib logs
+
+With `--verbose`, internal TDLib log lines are printed. Upstream rarely includes raw proxy passwords in log text, but **theoretically** a TDLib version could log sensitive data. Treat verbose logs like any other diagnostic stream in untrusted environments.
 
 This project links the **shared TDLib JSON client** library:
 
@@ -161,4 +169,4 @@ cargo clippy --no-default-features -- -D warnings
 - **Approach:** Direct **tdjson FFI** in `src/tdlib_live.rs` (behind the `tdlib` feature), with `build.rs` making link flags explicit. This avoids immature generated bindings while keeping full control over `@extra` correlation and the authorization-state sequence.
 - **Why not a Rust TDLib crate:** Few crates track upstream closely; raw FFI + `serde_json` is simpler to keep buildable and debuggable.
 - **Assumptions:** A compatible `tdjson` shared library is installed; JSON field names match your TDLib version (snake_case keys as in upstream TL).
-- **Caveats:** All `td_receive` calls used here run on **one thread**; the pointer returned by `td_receive` is only valid until the next `td_receive` / `td_execute` on that thread—this implementation copies the string immediately. Temporary TDLib database directories are created under the system temp folder per run.
+- **Caveats:** All `td_receive` calls used here run on **one thread**; the pointer returned by `td_receive` is only valid until the next `td_receive` / `td_execute` on that thread—this implementation copies the string immediately. Temporary TDLib database directories are created under the system temp folder per run. Every exit path after `td_create_client_id` runs `close` and clears the log callback so the next probe in-process does not inherit state. Timeouts carry a `ProbeTimeoutContext` so verbose output still shows elapsed time and authorization states reached.

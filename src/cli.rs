@@ -13,11 +13,15 @@ use std::time::Duration;
 )]
 pub struct Cli {
     /// Proxy link (positional). Mutually exclusive with --proxy-link.
-    #[arg(value_name = "PROXY_LINK")]
+    #[arg(value_name = "PROXY_LINK", conflicts_with = "proxy_link_flag")]
     pub positional_proxy: Option<String>,
 
     /// Full Telegram proxy link (alternative to positional).
-    #[arg(long = "proxy-link", value_name = "URL")]
+    #[arg(
+        long = "proxy-link",
+        value_name = "URL",
+        conflicts_with = "positional_proxy"
+    )]
     pub proxy_link_flag: Option<String>,
 
     #[arg(long)]
@@ -52,6 +56,7 @@ impl ResolvedCli {
     pub fn from_env() -> Result<Self, CliError> {
         let cli = Cli::parse();
 
+        // clap enforces conflicts_with; keep explicit match for clarity and tests.
         let proxy_link = match (&cli.positional_proxy, &cli.proxy_link_flag) {
             (Some(_), Some(_)) => return Err(CliError::AmbiguousProxyLink),
             (Some(s), None) => s.clone(),

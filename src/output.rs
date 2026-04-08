@@ -6,7 +6,7 @@
 //! request to go **client → proxy → Telegram → back**, as measured by TDLib. It is **not** an
 //! ICMP ping, and it is **not** the raw TCP connect time to the proxy alone.
 
-use crate::proxy_link::{ProxyConfig, ProxyKind};
+use crate::proxy_link::{redact_sensitive_query_in_link, ProxyConfig, ProxyKind};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -71,26 +71,43 @@ pub struct ProbeReport {
 impl ProbeReport {
     pub fn from_probe_failure(err: &crate::error::ProbeError) -> Self {
         let now = wall_ms();
-        let (interpretation, msg) = match err {
-            crate::error::ProbeError::Timeout => (Interpretation::Timeout, "Timeout".to_string()),
-            crate::error::ProbeError::TdlibInit(s) => {
-                (Interpretation::TdlibInitializationFailure, s.clone())
-            }
-            crate::error::ProbeError::Internal(s) => {
-                (Interpretation::InternalUnexpected, s.clone())
-            }
-        };
-        ProbeReport {
-            ok: false,
-            latency_ms: None,
-            error_message: Some(msg),
-            interpretation,
-            auth_states_seen: Vec::new(),
-            tdlib_log_lines: Vec::new(),
-            probe_start_wall_ms: now,
-            probe_end_wall_ms: now,
-            wall_duration: Duration::ZERO,
-            tdlib_reported_seconds: None,
+        match err {
+            crate::error::ProbeError::Timeout(ctx) => ProbeReport {
+                ok: false,
+                latency_ms: None,
+                error_message: Some("Timeout".to_string()),
+                interpretation: Interpretation::Timeout,
+                auth_states_seen: ctx.auth_states_seen.clone(),
+                tdlib_log_lines: ctx.tdlib_log_lines.clone(),
+                probe_start_wall_ms: ctx.probe_start_wall_ms,
+                probe_end_wall_ms: ctx.probe_end_wall_ms,
+                wall_duration: ctx.wall_duration,
+                tdlib_reported_seconds: None,
+            },
+            crate::error::ProbeError::TdlibInit(s) => ProbeReport {
+                ok: false,
+                latency_ms: None,
+                error_message: Some(s.clone()),
+                interpretation: Interpretation::TdlibInitializationFailure,
+                auth_states_seen: Vec::new(),
+                tdlib_log_lines: Vec::new(),
+                probe_start_wall_ms: now,
+                probe_end_wall_ms: now,
+                wall_duration: Duration::ZERO,
+                tdlib_reported_seconds: None,
+            },
+            crate::error::ProbeError::Internal(s) => ProbeReport {
+                ok: false,
+                latency_ms: None,
+                error_message: Some(s.clone()),
+                interpretation: Interpretation::InternalUnexpected,
+                auth_states_seen: Vec::new(),
+                tdlib_log_lines: Vec::new(),
+                probe_start_wall_ms: now,
+                probe_end_wall_ms: now,
+                wall_duration: Duration::ZERO,
+                tdlib_reported_seconds: None,
+            },
         }
     }
 }
@@ -181,7 +198,11 @@ fn render_verbose_text(
     report: &ProbeReport,
     w: &mut impl Write,
 ) -> io::Result<()> {
-    writeln!(w, "input_link={}", proxy.original_input)?;
+    writeln!(
+        w,
+        "input_link={}",
+        redact_sensitive_query_in_link(&proxy.original_input)
+    )?;
     writeln!(w, "detected_type={}", proxy_type_str(proxy.kind))?;
     writeln!(w, "server={}", proxy.server)?;
     writeln!(w, "port={}", proxy.port)?;

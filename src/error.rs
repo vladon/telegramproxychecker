@@ -29,7 +29,7 @@ pub enum CliError {
     #[error("invalid API hash: {0}")]
     InvalidApiHash(String),
 
-    #[error("--auth-session must be an existing directory ({0})")]
+    #[error("--auth-session path exists but is not a directory ({0})")]
     InvalidAuthSession(String),
 }
 

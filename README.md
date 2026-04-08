@@ -48,7 +48,7 @@ tg-proxy-check --proxy-link 'https://t.me/socks?server=1.2.3.4&port=1080'
 | `--verbose` | Extra diagnostics; sensitive query params redacted in `input_link=`; see note on TDLib logs below. |
 | `--json` | Single-line JSON on stdout. |
 | `--timeout SECONDS` | Wall-clock limit for the whole probe (default: 60). |
-| `--auth-session DIR` | Existing directory for TDLib `database_directory` (logged-in session). Enables **`getPromoData`** / subscription checks on MTProto success; optional. |
+| `--auth-session DIR` | TDLib `database_directory` (created if missing; files under `DIR/tg-proxy-check-files/`). Runs stdin login (**phone** / **code** / **2FA**) until TDLib is ready when needed; session persists on disk. Enables **`getPromoData`** on MTProto success; optional. |
 | `--api-id` / `--api-hash` | Override `TG_API_ID` / `TG_API_HASH`. |
 
 ## Example output
@@ -73,7 +73,7 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 {"ok":true,"proxy_type":"mtproto","server":"1.2.3.4","port":443,"latency_ms":412,"message":"Telegram reachable through proxy","sponsored":{"status":"unknown","channel_id":null},"subscription":{"checked":false,"joined":null}}
 ```
 
-**`sponsored`** and **`subscription`** are always present. Without **`--auth-session`**, `sponsored.status` is **`unknown`**, `subscription.checked` is **`false`**, and no promo calls are made. With **`--auth-session DIR`** (an existing directory used as TDLib `database_directory` for a logged-in session; files go under `DIR/tg-proxy-check-files/`), **MTProto** probes wait for **`authorizationStateReady`**, then call TDLib **`getPromoData`**. Responses are interpreted only by `@type`: **`promoDataEmpty`** → `sponsored.no`; **`promoData`** with a non-null **`peer`** → `sponsored.yes` and `channel_id` from that peer; otherwise **`unknown`**. If there is a promo peer, the tool calls **`getMe`** and **`getChatMember`** so **`subscription.joined`** can be **`true`** / **`false`** when TDLib returns **`chatMember`** (otherwise **`null`**). **`getPromoData` is not in all TDLib versions**—if TDLib returns an error for that request, `sponsored` stays **`unknown`** and **`subscription.checked`** is **`true`**. SOCKS5 does not run this path (`checked` stays **`false`**).
+**`sponsored`** and **`subscription`** are always present. Without **`--auth-session`**, `sponsored.status` is **`unknown`**, `subscription.checked` is **`false`**, and no promo calls are made. With **`--auth-session DIR`** (TDLib `database_directory`; created if missing; files under `DIR/tg-proxy-check-files/`), **MTProto** probes complete TDLib login via stderr prompts and stdin (**Enter phone number:** / **Enter code:** / **Enter 2FA password:**) when the database has no session, then wait for **`authorizationStateReady`**, then call **`getPromoData`** (subsequent runs reuse the session and skip prompts). Responses are interpreted only by `@type`: **`promoDataEmpty`** → `sponsored.no`; **`promoData`** with a non-null **`peer`** → `sponsored.yes` and `channel_id` from that peer; otherwise **`unknown`**. If there is a promo peer, the tool calls **`getMe`** and **`getChatMember`** so **`subscription.joined`** can be **`true`** / **`false`** when TDLib returns **`chatMember`** (otherwise **`null`**). **`getPromoData` is not in all TDLib versions**—if TDLib returns an error for that request, `sponsored` stays **`unknown`** and **`subscription.checked`** is **`true`**. SOCKS5 does not run this path (`checked` stays **`false`**).
 
 **JSON failure:**
 

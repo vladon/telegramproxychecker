@@ -41,8 +41,8 @@ pub struct Cli {
     #[arg(long, value_name = "HASH")]
     pub api_hash: Option<String>,
 
-    /// TDLib `database_directory` with an existing logged-in session (files go under `<DIR>/tg-proxy-check-files/`).
-    /// When set, MTProto probes may run `getPromoData` after `authorizationStateReady`.
+    /// TDLib `database_directory` for a persistent session (created if missing; files under `<DIR>/tg-proxy-check-files/`).
+    /// When set, TDLib runs the full login flow on stdin when needed, then `getPromoData` may run after `authorizationStateReady`.
     #[arg(long, value_name = "DIR")]
     pub auth_session: Option<PathBuf>,
 }
@@ -76,7 +76,7 @@ impl ResolvedCli {
         }
 
         if let Some(ref p) = cli.auth_session {
-            if !p.is_dir() {
+            if p.exists() && !p.is_dir() {
                 return Err(CliError::InvalidAuthSession(p.display().to_string()));
             }
         }

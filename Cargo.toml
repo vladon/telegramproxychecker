@@ -11,8 +11,9 @@ name = "tg-proxy-check"
 path = "src/main.rs"
 
 [features]
-default = ["tdlib"]
-# Disable default features to build/test without linking libtdjson (parser-only CI).
+# `tdlib` is opt-in so `cargo build --release` works without libtdjson (parser-only binary).
+# For real probes: `cargo build --release --features tdlib` plus TDLIB_LIB_DIR or pkg-config.
+default = []
 tdlib = []
 
 [dependencies]

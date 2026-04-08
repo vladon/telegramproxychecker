@@ -28,6 +28,8 @@ Query parameters are URL-decoded. For `--verbose` text output, `input_link=` sho
 
 ## Usage
 
+Build **with** TDLib for real probes: `cargo build --release --features tdlib` (see [Build instructions](#build-instructions)). A plain `cargo build --release` produces a binary that parses links but cannot run `pingProxy` until you rebuild with `--features tdlib`.
+
 ```bash
 export TG_API_ID="123456"
 export TG_API_HASH="your_api_hash"
@@ -112,11 +114,11 @@ Minimum expected API: multiplexed JSON functions `td_create_client_id`, `td_send
 
 ### Pointing the build at `libtdjson`
 
-Set **`TDLIB_LIB_DIR`** to the directory containing the library, then build:
+Set **`TDLIB_LIB_DIR`** to the directory containing the library, enable the **`tdlib`** feature, then build:
 
 ```bash
 export TDLIB_LIB_DIR=/opt/tdlib/lib
-cargo build --release
+cargo build --release --features tdlib
 ```
 
 Optional static link hint for `build.rs`:
@@ -129,11 +131,25 @@ If you ship a `tdjson.pc` file, `pkg-config` is tried automatically.
 
 ## Build instructions
 
+**Without TDLib** (always works; probes exit with a clear “built without tdlib” error):
+
+```bash
+cargo build --release
+cargo test
+```
+
+**With TDLib** (real `pingProxy` checks):
+
+```bash
+export TDLIB_LIB_DIR=/path/to/lib   # if pkg-config does not find tdjson
+cargo build --release --features tdlib
+```
+
 ### Linux
 
 1. Install or build TDLib; note the directory with `libtdjson.so`.
 2. `export TDLIB_LIB_DIR=/path/to/lib` (if not in a default linker path).
-3. `cargo build --release`
+3. `cargo build --release --features tdlib`
 4. At run time: ensure `LD_LIBRARY_PATH` includes the directory with `libtdjson.so` if needed.
 
 ### macOS
@@ -146,15 +162,15 @@ Same as Linux for `libtdjson.dylib`. If the loader cannot find the library, set 
 - **MSVC**: point `TDLIB_LIB_DIR` at the folder containing `tdjson.lib` (import library) for the link step; ship the matching `tdjson.dll` at run time.
 - **GNU / MinGW**: you may need `RUSTFLAGS=-L/path/to/lib` in addition to `TDLIB_LIB_DIR`, depending on your toolchain.
 
-### Building without TDLib (parser / tests only)
+### Cargo feature `tdlib`
 
-To compile and run **parser tests** without `libtdjson` installed:
+TDLib is **not** enabled by default so the project builds without `libtdjson`. Enable it for linking and probes:
 
 ```bash
-cargo test --no-default-features
+cargo build --release --features tdlib
 ```
 
-The default `tdlib` Cargo feature links TDLib; disabling default features skips linking and `probe_proxy` returns a clear “built without tdlib” initialization error.
+Without `tdlib`, `probe_proxy` returns a clear initialization error at run time (exit code 4).
 
 ## Troubleshooting
 
@@ -172,7 +188,7 @@ The default `tdlib` Cargo feature links TDLib; disabling default features skips 
 
 ### TDLib initialization failure (exit code 4)
 
-- Confirm the binary was built **with** the default `tdlib` feature and that `td_create_client_id` succeeds (see verbose output / TDLib logs if enabled).
+- Confirm the binary was built **with** `--features tdlib` and that `td_create_client_id` succeeds (see verbose output / TDLib logs if enabled). If you used a plain `cargo build --release`, rebuild with `--features tdlib`.
 - Wrong or mismatched `api_id` / `api_hash` pairs often surface as TDLib errors during startup, not as parser errors.
 
 ### Internal / unexpected (exit code 5)
@@ -181,10 +197,11 @@ The default `tdlib` Cargo feature links TDLib; disabling default features skips 
 
 ### TDLib linking and runtime failures
 
-**Build stops in `build.rs` with “Could not find `tdjson` for linking”**
+**Build stops in `build.rs` with “could not find `tdjson` for linking”**
 
-- This is intentional: the script refuses to invoke the linker with bare `-ltdjson` when neither `TDLIB_LIB_DIR` nor `pkg-config tdjson` provides a library path (that case used to fail with a cryptic `unable to find library -ltdjson`).
-- Set `TDLIB_LIB_DIR` to the directory that contains `libtdjson.so` (or the platform equivalent), then `cargo build --release` again.
+- You ran with `--features tdlib` but neither `TDLIB_LIB_DIR` nor `pkg-config tdjson` points at the library (bare `-ltdjson` used to fail with a cryptic linker error).
+- Set `TDLIB_LIB_DIR` to the directory that contains `libtdjson.so` (or the platform equivalent), then `cargo build --release --features tdlib` again.
+- If you only wanted a parser-only binary, omit `--features tdlib`: `cargo build --release`.
 - If you deliberately link only via `RUSTFLAGS=-L...`, either set `TDLIB_LIB_DIR` to that same directory or set `TDLIB_ALLOW_BARE_LINK=1` to opt back into bare `-ltdjson`.
 
 **Link step: “cannot find `-ltdjson`” / unresolved `td_create_client_id`**
@@ -202,15 +219,17 @@ The default `tdlib` Cargo feature links TDLib; disabling default features skips 
 
 - The crate expects the multiplexed JSON API (`td_create_client_id`, `td_send`, `td_receive`). Very old installs that only ship `td_json_client_*` need a different FFI layer; mismatched headers vs binary often crash or return garbage—rebuild TDLib and this tool against the same version.
 
-**Build without TDLib for parser-only workflows**
+**Parser-only workflows**
 
-- Use `cargo build --no-default-features` or `cargo test --no-default-features` when you only need link parsing and do not have `libtdjson` installed.
+- `cargo build --release` and `cargo test` work without `libtdjson`. Add `--features tdlib` when you install TDLib.
 
 ## Development
 
 ```bash
-cargo test --no-default-features   # proxy parser integration tests
-cargo clippy --no-default-features -- -D warnings
+cargo test
+cargo clippy --all-targets -- -D warnings
+# optional: type-check / lint the TDLib FFI path
+cargo clippy --all-targets --features tdlib -- -D warnings
 ```
 
 ---

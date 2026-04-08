@@ -7,7 +7,7 @@
 //!
 //! ## API
 //!
-//! With the default `tdlib` Cargo feature, this crate uses the multiplexed interface:
+//! With the `tdlib` Cargo feature enabled, this crate uses the multiplexed interface:
 //! `td_create_client_id`, `td_send`, `td_receive` (see TDLib `td_json_client.h`). All
 //! `td_receive` calls run on the invoking thread; the returned C string must be copied before
 //! the next `td_receive` / `td_execute` on that thread.
@@ -45,8 +45,8 @@ pub fn probe_proxy(
 ) -> Result<crate::output::ProbeReport, crate::error::ProbeError> {
     let _ = (proxy, creds, settings);
     Err(crate::error::ProbeError::TdlibInit(
-        "Built without the `tdlib` Cargo feature (for example `cargo build --no-default-features`). \
-         Re-enable default features and install libtdjson to run probes."
+        "Built without the `tdlib` Cargo feature. Rebuild with `--features tdlib`, set TDLIB_LIB_DIR \
+         (or pkg-config tdjson), and ensure libtdjson is available at run time."
             .into(),
     ))
 }

@@ -5,7 +5,7 @@ ARG CROSS_BASE_IMAGE="ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5"
 FROM ${CROSS_BASE_IMAGE}
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    gperf perl make ca-certificates curl cmake \
+    gperf perl make ca-certificates curl cmake ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/cross-prebuild-musl.sh /tmp/cross-prebuild-musl.sh

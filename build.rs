@@ -104,6 +104,11 @@ fn main() {
 
     if msvc {
         cfg.static_crt(false);
+    } else if is_musl_target {
+        // Unix Makefiles + Cargo’s jobserver can compile tdutils sources before TDLib codegen
+        // creates `tdutils/generate/auto/*.cpp` (missing rule for mime_type_to_extension.cpp).
+        // Ninja gets dependency edges from CMake correctly (see TDLib + parallel make issues).
+        cfg.generator("Ninja");
     }
 
     if let Ok(root) = env::var("OPENSSL_ROOT_DIR") {

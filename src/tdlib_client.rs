@@ -45,8 +45,7 @@ pub fn probe_proxy(
 ) -> Result<crate::output::ProbeReport, crate::error::ProbeError> {
     let _ = (proxy, creds, settings);
     Err(crate::error::ProbeError::TdlibInit(
-        "Built without the `tdlib` Cargo feature. Rebuild with `--features tdlib`, set TDLIB_LIB_DIR \
-         (or pkg-config tdjson), and ensure libtdjson is available at run time."
+        "Built without the `tdlib` Cargo feature (use default features or `cargo build --features tdlib`)."
             .into(),
     ))
 }

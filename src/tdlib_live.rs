@@ -1,8 +1,10 @@
 //! TDLib multiplexed JSON client: `td_create_client_id` / `td_send` / `td_receive`.
 //!
-//! `pingProxy` is sent once TDLib reports `authorizationStateWaitPhoneNumber`, or immediately
-//! after a successful `checkDatabaseEncryptionKey` response (`ok`) so encrypted databases still
-//! reach a ping-capable state without a phone login.
+//! TDLib **v1.8.0** defines `pingProxy proxy_id:int32` only (no inline proxy). This module first
+//! sends **`addProxy`** (`enable: true`), then **`pingProxy`** with the returned **`id`**.
+//!
+//! The add/ping sequence starts once TDLib reports `authorizationStateWaitPhoneNumber`, or
+//! immediately after a successful `checkDatabaseEncryptionKey` response (`ok`).
 
 use super::tdjson_sys;
 use super::{TdlibCredentials, TdlibProbeSettings};
@@ -193,6 +195,7 @@ pub fn probe_proxy(
     let mut auth_states_seen: Vec<String> = Vec::new();
     let mut set_params_sent = false;
     let mut check_key_sent = false;
+    let mut add_proxy_extra: Option<String> = None;
     let mut ping_extra: Option<String> = None;
     let mut ping_result: Option<Result<f64, String>> = None;
 
@@ -251,6 +254,7 @@ pub fn probe_proxy(
                         &st,
                         &mut set_params_sent,
                         &mut check_key_sent,
+                        &mut add_proxy_extra,
                         &mut ping_extra,
                         &mut ping_result,
                     ) {
@@ -270,6 +274,7 @@ pub fn probe_proxy(
                     t,
                     &mut set_params_sent,
                     &mut check_key_sent,
+                    &mut add_proxy_extra,
                     &mut ping_extra,
                     &mut ping_result,
                 ) {
@@ -283,6 +288,14 @@ pub fn probe_proxy(
                 if ex == extra_auth {
                     td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
+                }
+                if let Some(ae) = add_proxy_extra.as_deref() {
+                    if ex == ae {
+                        td_shutdown_session(client_id);
+                        return Err(ProbeError::TdlibInit(format!(
+                            "addProxy failed: {msg}"
+                        )));
+                    }
                 }
                 if let Some(pe) = ping_extra.as_deref() {
                     if ex == pe {
@@ -302,9 +315,28 @@ pub fn probe_proxy(
             "ok" => {
                 let ex = extra_for_match(&v).unwrap_or_default();
                 if ex.starts_with("checkDatabaseEncryptionKey-") {
-                    if let Err(e) =
-                        try_send_ping(client_id, proxy, &mut ping_extra, &mut ping_result)
-                    {
+                    if let Err(e) = try_start_proxy_ping(
+                        client_id,
+                        proxy,
+                        &mut add_proxy_extra,
+                        &mut ping_extra,
+                        &mut ping_result,
+                    ) {
+                        td_shutdown_session(client_id);
+                        return Err(e);
+                    }
+                }
+            }
+            "proxy" => {
+                let ex = extra_for_match(&v).unwrap_or_default();
+                if Some(ex.as_str()) == add_proxy_extra.as_deref() {
+                    if let Err(e) = on_add_proxy_response(
+                        client_id,
+                        &v,
+                        &mut add_proxy_extra,
+                        &mut ping_extra,
+                        &mut ping_result,
+                    ) {
                         td_shutdown_session(client_id);
                         return Err(e);
                     }
@@ -390,6 +422,7 @@ fn handle_auth_state(
     state: &str,
     set_params_sent: &mut bool,
     check_key_sent: &mut bool,
+    add_proxy_extra: &mut Option<String>,
     ping_extra: &mut Option<String>,
     ping_result: &mut Option<Result<f64, String>>,
 ) -> Result<(), ProbeError> {
@@ -416,16 +449,58 @@ fn handle_auth_state(
             *check_key_sent = true;
         }
         "authorizationStateWaitPhoneNumber" => {
-            try_send_ping(client_id, proxy, ping_extra, ping_result)?;
+            try_start_proxy_ping(
+                client_id,
+                proxy,
+                add_proxy_extra,
+                ping_extra,
+                ping_result,
+            )?;
         }
         _ => {}
     }
     Ok(())
 }
 
-fn try_send_ping(
+/// Register the proxy with TDLib (`addProxy`), then `pingProxy(proxy_id)` when the `proxy` object returns.
+fn try_start_proxy_ping(
     client_id: i32,
     proxy: &ProxyConfig,
+    add_proxy_extra: &mut Option<String>,
+    ping_extra: &mut Option<String>,
+    ping_result: &mut Option<Result<f64, String>>,
+) -> Result<(), ProbeError> {
+    if ping_result.is_some() || add_proxy_extra.is_some() || ping_extra.is_some() {
+        return Ok(());
+    }
+    let extra = next_extra("addProxy");
+    *add_proxy_extra = Some(extra.clone());
+    let req = build_add_proxy(&extra, proxy)?;
+    let s = serde_json::to_string(&req)
+        .map_err(|e| ProbeError::Internal(format!("serialize addProxy: {e}")))?;
+    send_raw(client_id, &s)?;
+    Ok(())
+}
+
+fn on_add_proxy_response(
+    client_id: i32,
+    v: &Value,
+    add_proxy_extra: &mut Option<String>,
+    ping_extra: &mut Option<String>,
+    ping_result: &mut Option<Result<f64, String>>,
+) -> Result<(), ProbeError> {
+    let id = v
+        .get("id")
+        .and_then(|x| x.as_i64())
+        .and_then(|i| i32::try_from(i).ok())
+        .ok_or_else(|| ProbeError::Internal("addProxy response missing id".into()))?;
+    *add_proxy_extra = None;
+    send_ping_with_proxy_id(client_id, id, ping_extra, ping_result)
+}
+
+fn send_ping_with_proxy_id(
+    client_id: i32,
+    proxy_id: i32,
     ping_extra: &mut Option<String>,
     ping_result: &mut Option<Result<f64, String>>,
 ) -> Result<(), ProbeError> {
@@ -434,7 +509,11 @@ fn try_send_ping(
     }
     let extra = next_extra("pingProxy");
     *ping_extra = Some(extra.clone());
-    let req = build_ping_proxy(&extra, proxy)?;
+    let req = json!({
+        "@type": "pingProxy",
+        "proxy_id": proxy_id,
+        "@extra": extra,
+    });
     let s = serde_json::to_string(&req)
         .map_err(|e| ProbeError::Internal(format!("serialize pingProxy: {e}")))?;
     send_raw(client_id, &s)?;
@@ -518,16 +597,28 @@ fn build_set_tdlib_parameters(
     })
 }
 
-fn build_ping_proxy(extra: &str, proxy: &ProxyConfig) -> Result<Value, ProbeError> {
-    let proxy_type = match proxy.kind {
+fn build_add_proxy(extra: &str, proxy: &ProxyConfig) -> Result<Value, ProbeError> {
+    let proxy_type = proxy_type_json(proxy)?;
+    Ok(json!({
+        "@type": "addProxy",
+        "@extra": extra,
+        "server": proxy.server,
+        "port": i32::from(proxy.port),
+        "enable": true,
+        "type": proxy_type,
+    }))
+}
+
+fn proxy_type_json(proxy: &ProxyConfig) -> Result<Value, ProbeError> {
+    match proxy.kind {
         ProxyKind::Mtproto => {
             let secret = proxy.mtproto_secret.as_ref().ok_or_else(|| {
                 ProbeError::Internal("MTProto secret missing in ProxyConfig".into())
             })?;
-            json!({
+            Ok(json!({
                 "@type": "proxyTypeMtproto",
                 "secret": secret,
-            })
+            }))
         }
         ProxyKind::Socks5 => {
             let mut obj = serde_json::Map::new();
@@ -538,18 +629,7 @@ fn build_ping_proxy(extra: &str, proxy: &ProxyConfig) -> Result<Value, ProbeErro
             if let Some(p) = &proxy.socks_password {
                 obj.insert("password".into(), json!(p));
             }
-            Value::Object(obj)
+            Ok(Value::Object(obj))
         }
-    };
-
-    Ok(json!({
-        "@type": "pingProxy",
-        "@extra": extra,
-        "proxy": {
-            "@type": "proxy",
-            "server": proxy.server,
-            "port": proxy.port,
-            "type": proxy_type,
-        }
-    }))
+    }
 }

@@ -93,6 +93,8 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 
 TDLib is **vendored and built by Cargo**. You do **not** clone TDLib separately, run CMake by hand, or install `libtdjson.so` (or any TDLib library) into `/usr/lib` or similar.
 
+**API detail (pinned v1.8.0):** `pingProxy` only accepts a **`proxy_id`** returned by **`addProxy`**. The tool registers your MTProto/SOCKS5 proxy with `addProxy` (`enable: true`) and then calls `pingProxy` with that id—passing an inline `proxy` object to `pingProxy` is not valid in this scheme version.
+
 ### Source tree
 
 - **Normal / reproducible path:** check out TDLib under **`third_party/td`** at the pinned commit (see [`third_party/README.md`](third_party/README.md)). `build.rs` runs CMake against that directory.
@@ -283,6 +285,6 @@ cargo clippy --all-targets -- -D warnings
 
 ## Design note (FFI)
 
-- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → `OUT_DIR/td-artifacts/<variant>/tdlib-install`). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles `pingProxy` / authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
+- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → `OUT_DIR/td-artifacts/<variant>/tdlib-install`). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles **`addProxy`** then **`pingProxy(proxy_id)`** (TDLib 1.8.0) plus authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
 - **Pinned version:** Upstream tag **`v1.8.0`** (commit `b3ab664a18f8611f4dfcd3054717504271eeaa7a`); bump `TD_COMMIT` / `TD_TARBALL_SHA256` / submodule instructions together when upgrading.
 - **Caveats:** All `td_receive` calls run on **one thread**; the pointer returned by `td_receive` is only valid until the next `td_receive` / `td_execute` on that thread—this implementation copies the string immediately. Temporary TDLib database directories are created under the system temp folder per run. Every exit path after `td_create_client_id` runs `close` and clears the log callback so the next probe in-process does not inherit state. Timeouts carry a `ProbeTimeoutContext` so verbose output still shows elapsed time and authorization states reached.

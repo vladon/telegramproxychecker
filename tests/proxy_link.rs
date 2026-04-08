@@ -122,7 +122,9 @@ fn duplicate_query_first_wins() {
 
 #[test]
 fn redact_strips_userinfo_and_password_param() {
-    let r = redact_sensitive_query_in_link("https://u:p@t.me/proxy?server=x&port=443&secret=z&password=zz");
+    let r = redact_sensitive_query_in_link(
+        "https://u:p@t.me/proxy?server=x&port=443&secret=z&password=zz",
+    );
     assert!(!r.contains("u:p@"));
     assert!(!r.contains("zz"));
     assert!(r.to_ascii_lowercase().contains("redacted"));
@@ -161,9 +163,7 @@ fn server_too_long_rejected() {
 #[test]
 fn server_with_newline_rejected() {
     let e = parse_proxy_link("tg://proxy?server=x%0Ay&port=443&secret=ab").unwrap_err();
-    assert!(
-        matches!(e, ParseError::InvalidUrl(ref s) if s.contains("control"))
-    );
+    assert!(matches!(e, ParseError::InvalidUrl(ref s) if s.contains("control")));
 }
 
 #[test]

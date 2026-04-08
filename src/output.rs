@@ -445,10 +445,7 @@ mod tests {
 
     #[test]
     fn scrub_tdlib_log_line_omits_sensitive_substrings() {
-        assert_eq!(
-            scrub_tdlib_log_line("[v2] connecting"),
-            "[v2] connecting"
-        );
+        assert_eq!(scrub_tdlib_log_line("[v2] connecting"), "[v2] connecting");
         assert_eq!(
             scrub_tdlib_log_line("password=foo"),
             "[omitted: possible credential substring in tdlib log]"
@@ -539,12 +536,7 @@ mod tests {
             subscription: SubscriptionReport::checked_joined(true),
         };
         let mut buf = Vec::new();
-        render_json(
-            &proxy,
-            &rep,
-            &mut buf,
-        )
-        .unwrap();
+        render_json(&proxy, &rep, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
         assert_eq!(v["sponsored"]["status"], "yes");

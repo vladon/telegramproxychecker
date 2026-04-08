@@ -101,11 +101,9 @@ fn extra_for_match(v: &Value) -> Option<String> {
 }
 
 fn send_raw(client_id: i32, json: &str) -> Result<(), ProbeError> {
-    tdjson_sys::send_json(client_id, json).map_err(|e| {
-        ProbeError::Internal(format!("request contains interior nul: {e}"))
-    })
+    tdjson_sys::send_json(client_id, json)
+        .map_err(|e| ProbeError::Internal(format!("request contains interior nul: {e}")))
 }
-
 
 fn client_matches(v: &Value, client_id: i32) -> bool {
     match v.get("@client_id") {
@@ -130,7 +128,9 @@ fn auth_state_from_update(v: &Value) -> Option<String> {
     {
         return Some(s.to_string());
     }
-    let inner = v.get("authorization_state").or_else(|| v.get("authorizationState"))?;
+    let inner = v
+        .get("authorization_state")
+        .or_else(|| v.get("authorizationState"))?;
     inner
         .get("@type")
         .or_else(|| inner.get("type"))
@@ -179,16 +179,11 @@ fn read_auth_line(
     probe_start_wall_ms: u128,
     auth_states_seen: &[String],
 ) -> Result<String, ProbeError> {
-    ensure_before_auth_prompt(
-        deadline,
-        probe_start,
-        probe_start_wall_ms,
-        auth_states_seen,
-    )?;
+    ensure_before_auth_prompt(deadline, probe_start, probe_start_wall_ms, auth_states_seen)?;
     eprint!("{}", prompt);
-    io::stderr().flush().map_err(|e| {
-        ProbeError::Internal(format!("flush stderr before auth prompt: {e}"))
-    })?;
+    io::stderr()
+        .flush()
+        .map_err(|e| ProbeError::Internal(format!("flush stderr before auth prompt: {e}")))?;
     let mut line = String::new();
     io::stdin()
         .read_line(&mut line)
@@ -397,9 +392,7 @@ pub fn probe_proxy(
                 if let Some(ae) = add_proxy_extra.as_deref() {
                     if ex == ae {
                         td_shutdown_session(client_id);
-                        return Err(ProbeError::TdlibInit(format!(
-                            "addProxy failed: {msg}"
-                        )));
+                        return Err(ProbeError::TdlibInit(format!("addProxy failed: {msg}")));
                     }
                 }
                 if let Some(pe) = ping_extra.as_deref() {
@@ -608,7 +601,8 @@ fn wait_for_authorization_ready(
         if auth.as_deref() == Some("authorizationStateReady") {
             return true;
         }
-        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(extra.as_str())
+        if json_type_name(&v) == Some("error")
+            && extra_for_match(&v).as_deref() == Some(extra.as_str())
         {
             return false;
         }
@@ -628,7 +622,10 @@ fn wait_for_authorization_ready(
 
 const SPONSOR_SCAN_GET_CHAT_MAX: usize = 200;
 
-fn run_mtproto_sponsor_flow(client_id: i32, deadline: Instant) -> (SponsoredReport, SubscriptionReport) {
+fn run_mtproto_sponsor_flow(
+    client_id: i32,
+    deadline: Instant,
+) -> (SponsoredReport, SubscriptionReport) {
     let checked = SubscriptionReport::checked_no_join_info();
     let load_extra = next_extra("loadChats");
     let load_req = match serde_json::to_string(&json!({
@@ -748,7 +745,8 @@ fn wait_rpc_ok(client_id: i32, deadline: Instant, want_extra: &str) -> bool {
         if !client_matches(&v, client_id) {
             continue;
         }
-        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(want_extra) {
+        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(want_extra)
+        {
             return false;
         }
         if json_type_name(&v) == Some("ok") && extra_for_match(&v).as_deref() == Some(want_extra) {
@@ -769,10 +767,12 @@ fn wait_chats_ids(client_id: i32, deadline: Instant, want_extra: &str) -> Option
         if !client_matches(&v, client_id) {
             continue;
         }
-        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(want_extra) {
+        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(want_extra)
+        {
             return None;
         }
-        if json_type_name(&v) == Some("chats") && extra_for_match(&v).as_deref() == Some(want_extra) {
+        if json_type_name(&v) == Some("chats") && extra_for_match(&v).as_deref() == Some(want_extra)
+        {
             return Some(parse_chat_id_list(v.get("chat_ids")?));
         }
     }
@@ -787,7 +787,8 @@ fn parse_chat_id_list(v: &Value) -> Vec<i64> {
 }
 
 fn json_i64(v: &Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
+    v.as_i64()
+        .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
 }
 
 fn chat_positions_have_mtproto_proxy_source(chat: &Value) -> bool {
@@ -849,11 +850,13 @@ fn fetch_my_user_id(client_id: i32, deadline: Instant) -> Option<i64> {
         if !client_matches(&v, client_id) {
             continue;
         }
-        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(extra.as_str())
+        if json_type_name(&v) == Some("error")
+            && extra_for_match(&v).as_deref() == Some(extra.as_str())
         {
             return None;
         }
-        if extra_for_match(&v).as_deref() == Some(extra.as_str()) && json_type_name(&v) == Some("user")
+        if extra_for_match(&v).as_deref() == Some(extra.as_str())
+            && json_type_name(&v) == Some("user")
         {
             return v.get("id").and_then(|x| x.as_i64());
         }
@@ -861,7 +864,12 @@ fn fetch_my_user_id(client_id: i32, deadline: Instant) -> Option<i64> {
     None
 }
 
-fn fetch_am_i_member(client_id: i32, deadline: Instant, chat_id: i64, user_id: i64) -> Option<bool> {
+fn fetch_am_i_member(
+    client_id: i32,
+    deadline: Instant,
+    chat_id: i64,
+    user_id: i64,
+) -> Option<bool> {
     let extra = next_extra("getChatMember");
     let req = serde_json::to_string(&json!({
         "@type": "getChatMember",
@@ -877,7 +885,8 @@ fn fetch_am_i_member(client_id: i32, deadline: Instant, chat_id: i64, user_id: i
         if !client_matches(&v, client_id) {
             continue;
         }
-        if json_type_name(&v) == Some("error") && extra_for_match(&v).as_deref() == Some(extra.as_str())
+        if json_type_name(&v) == Some("error")
+            && extra_for_match(&v).as_deref() == Some(extra.as_str())
         {
             return None;
         }
@@ -950,13 +959,7 @@ fn handle_auth_state(
                 })?;
                 send_raw(client_id, &s)?;
             } else {
-                try_start_proxy_ping(
-                    client_id,
-                    proxy,
-                    add_proxy_extra,
-                    ping_extra,
-                    ping_result,
-                )?;
+                try_start_proxy_ping(client_id, proxy, add_proxy_extra, ping_extra, ping_result)?;
             }
         }
         "authorizationStateWaitCode" if interactive_auth => {
@@ -973,8 +976,9 @@ fn handle_auth_state(
                 "code": code,
                 "@extra": extra,
             });
-            let s = serde_json::to_string(&req)
-                .map_err(|e| ProbeError::Internal(format!("serialize checkAuthenticationCode: {e}")))?;
+            let s = serde_json::to_string(&req).map_err(|e| {
+                ProbeError::Internal(format!("serialize checkAuthenticationCode: {e}"))
+            })?;
             send_raw(client_id, &s)?;
         }
         "authorizationStateWaitEmailAddress" if interactive_auth => {
@@ -1041,13 +1045,7 @@ fn handle_auth_state(
             if *interactive_proxy_registered {
                 send_ping_with_proxy(client_id, proxy, ping_extra, ping_result)?;
             } else if add_proxy_extra.is_none() && ping_extra.is_none() {
-                try_start_proxy_ping(
-                    client_id,
-                    proxy,
-                    add_proxy_extra,
-                    ping_extra,
-                    ping_result,
-                )?;
+                try_start_proxy_ping(client_id, proxy, add_proxy_extra, ping_extra, ping_result)?;
             }
         }
         _ => {}
@@ -1171,8 +1169,8 @@ fn build_set_tdlib_parameters(
     files_directory: &str,
     creds: &TdlibCredentials,
 ) -> Value {
-    let application_version = std::env::var("TG_APPLICATION_VERSION")
-        .unwrap_or_else(|_| "5.13.1".to_string());
+    let application_version =
+        std::env::var("TG_APPLICATION_VERSION").unwrap_or_else(|_| "5.13.1".to_string());
     json!({
         "@type": "setTdlibParameters",
         "@extra": extra,

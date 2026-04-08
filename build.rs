@@ -28,8 +28,7 @@ use std::process::Command;
 
 /// Pinned TDLib revision (`master` at bump time; required for current Telegram login / ping).
 const TD_COMMIT: &str = "8ff05a0e7e064fa796593f3105c2dcf983e279d4";
-const TD_TARBALL_SHA256: &str =
-    "c884c64708314f49ea0eadded7a97edaab0db3e8dc4da7e8cb45ee1a9587a48b";
+const TD_TARBALL_SHA256: &str = "c884c64708314f49ea0eadded7a97edaab0db3e8dc4da7e8cb45ee1a9587a48b";
 
 /// Order matches TDLib’s dependency graph for the JSON static stack (verified against install tree).
 const TD_STATIC_LIBS: &[&str] = &[
@@ -83,8 +82,8 @@ fn main() {
 
     let variant_raw = env::var("TDLIB_BUILD_VARIANT").unwrap_or_else(|_| "default".into());
     let v = variant_raw.to_ascii_lowercase();
-    let musl_static_tdlib = target_env == "musl"
-        && (v.contains("musl-static") || v.contains("musl-v3-static"));
+    let musl_static_tdlib =
+        target_env == "musl" && (v.contains("musl-static") || v.contains("musl-v3-static"));
 
     let mut cfg = Config::new(&td_src);
     cfg.out_dir(artifact_root.join("tdlib-cmake"))
@@ -207,16 +206,16 @@ fn resolve_td_source(manifest_dir: &Path, out_dir: &Path) -> PathBuf {
         let file = File::open(&tarball).expect("open tarball");
         let dec = flate2::read::GzDecoder::new(file);
         let mut archive = tar::Archive::new(dec);
-        archive
-            .unpack(&extract_root)
-            .expect("unpack TDLib tarball");
+        archive.unpack(&extract_root).expect("unpack TDLib tarball");
     }
 
     let mut td_root: Option<PathBuf> = None;
     for e in fs::read_dir(&extract_root).expect("read extract dir") {
         let e = e.expect("dir entry");
         let p = e.path();
-        if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("td-"))
+        if p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("td-"))
             && p.join("CMakeLists.txt").is_file()
         {
             td_root = Some(p);
@@ -234,14 +233,7 @@ fn download_file(url: &str, dest: &Path) {
         return;
     }
     if Command::new("curl")
-        .args([
-            "-fL",
-            "--retry",
-            "3",
-            "--connect-timeout",
-            "30",
-            "-o",
-        ])
+        .args(["-fL", "--retry", "3", "--connect-timeout", "30", "-o"])
         .arg(dest)
         .arg(url)
         .status()
@@ -308,10 +300,7 @@ fn link_unix_static_apple(lib_dir: &Path) {
                 p.display()
             );
         }
-        println!(
-            "cargo:rustc-link-arg=-Wl,-force_load,{}",
-            p.display()
-        );
+        println!("cargo:rustc-link-arg=-Wl,-force_load,{}", p.display());
     }
 }
 
@@ -345,11 +334,7 @@ fn link_system_crypto_z(lib_dir: &Path, target_os: &str, static_ssl: bool) {
 
 fn tdlib_built_with_zstd(lib_dir: &Path) -> bool {
     let tdcore = lib_dir.join("libtdcore.a");
-    let Ok(out) = Command::new("nm")
-        .arg("-u")
-        .arg(&tdcore)
-        .output()
-    else {
+    let Ok(out) = Command::new("nm").arg("-u").arg(&tdcore).output() else {
         return false;
     };
     String::from_utf8_lossy(&out.stdout).contains("ZSTD_")

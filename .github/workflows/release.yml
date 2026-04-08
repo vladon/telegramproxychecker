@@ -140,6 +140,16 @@ jobs:
         with:
           tool: cross
 
+      - name: Verify Cross.toml musl setup (dockerfile, not pre-build array)
+        run: |
+          if grep -qE '^\s*pre-build\s*=' Cross.toml; then
+            echo "::error::Cross.toml must not use a pre-build array for musl (repo scripts are not in that image layer). Use docker/cross-musl.Dockerfile only."
+            exit 1
+          fi
+          test -f docker/cross-musl.Dockerfile
+          test -f scripts/cross-prebuild-musl.sh
+          grep -q 'docker/cross-musl.Dockerfile' Cross.toml
+
       - name: cargo build --release (cross musl)
         env:
           TDLIB_BUILD_VARIANT: ${{ matrix.tdlib_variant }}

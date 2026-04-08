@@ -11,7 +11,8 @@ passthrough = [
     "PKG_CONFIG_PATH=/musl-local/lib/pkgconfig",
 ]
 
-# Custom image (not pre-build): `pre-build` runs during `docker build` before the repo is copied,
-# so repo scripts are unavailable there. This Dockerfile uses project root as build context.
-[target.x86_64-unknown-linux-musl]
-dockerfile = "docker/cross-musl.Dockerfile"
+# Custom image only — do **not** use a `pre-build = [...]` array that runs `scripts/…` here: that
+# hook’s Dockerfile layer has no workspace copy, so `bash scripts/cross-prebuild-musl.sh` always fails.
+[target.x86_64-unknown-linux-musl.dockerfile]
+file = "docker/cross-musl.Dockerfile"
+context = "."

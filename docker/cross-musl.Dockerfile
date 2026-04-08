@@ -1,7 +1,7 @@
 # Extends the cross musl image with a musl sysroot at /musl-local (zlib, OpenSSL, zstd) for TDLib CMake.
 # Built with project root as context so COPY can see scripts/.
-# cross-rs supplies CROSS_BASE_IMAGE when building this Dockerfile (see their custom image docs).
-ARG CROSS_BASE_IMAGE
+# cross-rs passes CROSS_BASE_IMAGE when building; default allows local `docker build` smoke tests.
+ARG CROSS_BASE_IMAGE=ghcr.io/cross-rs/cross:x86_64-unknown-linux-musl
 FROM $CROSS_BASE_IMAGE
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

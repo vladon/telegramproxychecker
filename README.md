@@ -177,6 +177,24 @@ The first build compiles TDLib and can take **several minutes** and several GB u
 
 ### Release build matrix (Linux x86_64)
 
+#### GitHub Actions (official binaries)
+
+Prebuilt Linux **x86_64** archives are produced **only** when you push a **git tag** (not on ordinary branch pushes or pull requests).
+
+- **Tag format:** exactly `MAJOR.MINOR.PATCH` (digits only), e.g. `1.2.3`. **Do not** use a `v` prefix (`v1.2.3` is rejected by the release workflow).
+- **Where to download:** the repository’s **GitHub Releases** page for that tag (release title equals the tag, no `v` prefix).
+- **Assets** (for tag `1.2.3`):
+  - `tg-proxy-check-1.2.3-linux-x86_64-gnu.tar.gz` (+ `.sha256`) — glibc, generic x86-64.
+  - `tg-proxy-check-1.2.3-linux-x86_64-gnu-v3.tar.gz` — glibc, **x86-64-v3** CPU features (needs a v3-capable CPU at runtime).
+  - `tg-proxy-check-1.2.3-linux-x86_64-musl.tar.gz` — musl + **`libtdjson.so`** next to the binary (rpath `$ORIGIN`).
+  - `tg-proxy-check-1.2.3-linux-x86_64-musl-v3.tar.gz` — musl + v3 + bundled `libtdjson.so`.
+  - `tg-proxy-check-1.2.3-linux-x86_64-musl-static.tar.gz` — **fully static** musl binary (`ldd` must report a static executable); OpenSSL/TDLib linked statically for CI.
+  - `tg-proxy-check-1.2.3-linux-x86_64-musl-v3-static.tar.gz` — fully static + x86-64-v3.
+
+Workflows live under [`.github/workflows/`](.github/workflows/): **`release.yml`** runs the full release matrix on matching tags; **`ci.yml`** runs lightweight `fmt` / `clippy` / `cargo test --no-default-features` on pushes and PRs to `main` or `master` only (no TDLib compile).
+
+#### Local / Makefile matrix
+
 One-shot (requires **`x86_64-unknown-linux-gnu`** and **`x86_64-unknown-linux-musl`** targets, plus musl-capable linker for musl rows):
 
 ```bash

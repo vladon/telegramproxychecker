@@ -32,7 +32,8 @@ fetch_zlib
 tar xzf zlib-src.tar.gz
 rm -f zlib-src.tar.gz
 cd zlib-1.3.1
-./configure --prefix="$PREFIX" --static
+# Position-independent objects so libz.a can be linked into OpenSSL's shared libcrypto.so.
+CFLAGS="-fPIC -O3" ./configure --prefix="$PREFIX" --static
 make -j"$(nproc)"
 make install
 cd "$work"

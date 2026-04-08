@@ -18,10 +18,11 @@ jobs:
     name: fmt, clippy, test (no TDLib)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.94.1
           components: rustfmt, clippy
 
       - name: cargo fmt

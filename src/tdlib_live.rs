@@ -481,23 +481,29 @@ fn build_set_tdlib_parameters(
     files_directory: &str,
     creds: &TdlibCredentials,
 ) -> Value {
+    // TDLib 1.8+ (pinned v1.8.0): `setTdlibParameters` takes a single `parameters` object
+    // (`tdlibParameters` in td_api.tl), not flat fields on the request.
     json!({
         "@type": "setTdlibParameters",
         "@extra": extra,
-        "use_test_dc": false,
-        "database_directory": database_directory,
-        "files_directory": files_directory,
-        "database_encryption_key": "",
-        "use_file_database": false,
-        "use_chat_info_database": false,
-        "use_message_database": false,
-        "use_secret_chats": false,
-        "api_id": creds.api_id,
-        "api_hash": creds.api_hash,
-        "system_language_code": "en",
-        "device_model": "tg-proxy-check",
-        "system_version": "",
-        "application_version": env!("CARGO_PKG_VERSION"),
+        "parameters": {
+            "@type": "tdlibParameters",
+            "use_test_dc": false,
+            "database_directory": database_directory,
+            "files_directory": files_directory,
+            "use_file_database": false,
+            "use_chat_info_database": false,
+            "use_message_database": false,
+            "use_secret_chats": false,
+            "api_id": creds.api_id,
+            "api_hash": creds.api_hash,
+            "system_language_code": "en",
+            "device_model": "tg-proxy-check",
+            "system_version": "",
+            "application_version": env!("CARGO_PKG_VERSION"),
+            "enable_storage_optimizer": false,
+            "ignore_file_names": false,
+        }
     })
 }
 

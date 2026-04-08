@@ -104,7 +104,25 @@ fn main() {
 
     if let Ok(root) = env::var("OPENSSL_ROOT_DIR") {
         if !root.is_empty() {
-            cfg.define("OPENSSL_ROOT_DIR", root);
+            cfg.define("OPENSSL_ROOT_DIR", root.as_str());
+            // Musl static TDLib sets `-static` in CMAKE_*_FLAGS; FindZLIB's try_compile then fails
+            // even though zlib is installed next to OpenSSL (e.g. /musl-local from cross-prebuild).
+            if target_env == "musl" {
+                cfg.define("ZLIB_ROOT", root.as_str());
+                let prefix = PathBuf::from(&root);
+                let zlib_inc = prefix.join("include");
+                let zlib_lib = prefix.join("lib").join("libz.a");
+                if zlib_inc.is_dir() {
+                    if let Some(s) = zlib_inc.to_str() {
+                        cfg.define("ZLIB_INCLUDE_DIR", s);
+                    }
+                }
+                if zlib_lib.is_file() {
+                    if let Some(s) = zlib_lib.to_str() {
+                        cfg.define("ZLIB_LIBRARY", s);
+                    }
+                }
+            }
         }
     }
 

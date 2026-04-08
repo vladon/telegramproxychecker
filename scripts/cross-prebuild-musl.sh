@@ -16,7 +16,21 @@ trap 'rm -rf "$work"' EXIT
 cd "$work"
 
 # --- zlib (static; OpenSSL uses it) ---
-curl -fL --retry 3 --connect-timeout 30 "https://zlib.net/zlib-1.3.1.tar.gz" | tar xz
+# zlib.net moved older point releases under /fossils/; top-level zlib-1.3.1.tar.gz often 404s.
+fetch_zlib() {
+  local url
+  for url in \
+    "https://zlib.net/fossils/zlib-1.3.1.tar.gz" \
+    "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"; do
+    if curl -fL --retry 3 --connect-timeout 30 "$url" -o zlib-src.tar.gz; then
+      return 0
+    fi
+  done
+  return 1
+}
+fetch_zlib
+tar xzf zlib-src.tar.gz
+rm -f zlib-src.tar.gz
 cd zlib-1.3.1
 ./configure --prefix="$PREFIX" --static
 make -j"$(nproc)"

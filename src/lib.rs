@@ -44,7 +44,7 @@ pub fn run() -> ExitCode {
     let report = match probe_proxy(&proxy, &creds, &td_settings) {
         Ok(r) => r,
         Err(e) => {
-            let partial = ProbeReport::from_probe_failure(&e);
+            let partial = ProbeReport::from_probe_failure(&e, &proxy);
             let exit: ExitCode = RunError::Probe(e).into();
             let opts = RenderOpts {
                 verbose: resolved.verbose,

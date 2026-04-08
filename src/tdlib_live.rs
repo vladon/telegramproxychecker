@@ -10,6 +10,7 @@ use super::tdjson_sys;
 use super::{TdlibCredentials, TdlibProbeSettings};
 use crate::error::{ProbeError, ProbeTimeoutContext};
 use crate::output::{success_interpretation, wall_ms, Interpretation, ProbeReport};
+use crate::output::SponsoredReport;
 use crate::proxy_link::{ProxyConfig, ProxyKind};
 use serde_json::{json, Value};
 use std::ffi::CStr;
@@ -362,9 +363,9 @@ pub fn probe_proxy(
     let end_wall = wall_ms();
     let wall_duration = start_instant.elapsed();
     let tdlib_log = copy_log_lines();
-    td_shutdown_session(client_id);
 
     let Some(pr) = ping_result else {
+        td_shutdown_session(client_id);
         return Err(ProbeError::Timeout(ProbeTimeoutContext {
             probe_start_wall_ms: start_wall,
             probe_end_wall_ms: end_wall,
@@ -373,6 +374,17 @@ pub fn probe_proxy(
             tdlib_log_lines: tdlib_log,
         }));
     };
+
+    let sponsored = match (&pr, proxy.kind) {
+        (Ok(_), ProxyKind::Socks5) => SponsoredReport::socks5_na(),
+        (Ok(_), ProxyKind::Mtproto) => detect_mtproto_sponsored_channel(client_id, deadline),
+        (Err(_), ProxyKind::Socks5) => SponsoredReport::socks5_na(),
+        (Err(_), ProxyKind::Mtproto) => {
+            SponsoredReport::unknown_none("pingProxy did not succeed")
+        }
+    };
+
+    td_shutdown_session(client_id);
 
     match pr {
         Ok(sec) => {
@@ -389,6 +401,7 @@ pub fn probe_proxy(
                 probe_end_wall_ms: end_wall,
                 wall_duration,
                 tdlib_reported_seconds: Some(sec),
+                sponsored,
             })
         }
         Err(msg) => Ok(ProbeReport {
@@ -402,6 +415,7 @@ pub fn probe_proxy(
             probe_end_wall_ms: end_wall,
             wall_duration,
             tdlib_reported_seconds: None,
+            sponsored,
         }),
     }
 }
@@ -410,6 +424,117 @@ fn push_unique(v: &mut Vec<String>, s: &str) {
     if v.last().map(|x| x.as_str()) != Some(s) {
         v.push(s.to_string());
     }
+}
+
+/// After a successful `pingProxy`, ask TDLib to load the main chat list and look for
+/// [`chatSourceMtprotoProxy`](https://core.telegram.org/tdlib/docs/td__api_8h.html) on a chat
+/// position (TDLib marks promo channels inserted by an MTProto proxy this way). No login is
+/// performed; if nothing is observed before the probe deadline, status stays **unknown**.
+fn detect_mtproto_sponsored_channel(client_id: i32, deadline: Instant) -> SponsoredReport {
+    if Instant::now() >= deadline {
+        return SponsoredReport::unknown_tdlib(
+            "probe deadline already reached before loadChats",
+        );
+    }
+    let extra = next_extra("loadChats");
+    let req = json!({
+        "@type": "loadChats",
+        "chat_list": {"@type": "chatListMain"},
+        "limit": 100,
+        "@extra": extra,
+    });
+    let req_s = match serde_json::to_string(&req) {
+        Ok(s) => s,
+        Err(_) => return SponsoredReport::unknown_tdlib("serialize loadChats failed"),
+    };
+    if send_raw(client_id, &req_s).is_err() {
+        return SponsoredReport::unknown_tdlib("send loadChats failed");
+    }
+
+    let mut saw_load_response = false;
+
+    while Instant::now() < deadline {
+        let Some(line) = receive_json_until(deadline, Duration::from_millis(500)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if !client_matches(&v, client_id) {
+            continue;
+        }
+
+        let Some(typ) = json_type_name(&v) else {
+            continue;
+        };
+
+        if typ == "error" {
+            if extra_for_match(&v).as_deref() != Some(extra.as_str()) {
+                continue;
+            }
+            let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+            // TDLib uses 404 when there is nothing left to load for `loadChats`.
+            if code == 404 {
+                saw_load_response = true;
+                continue;
+            }
+            let msg = tdlib_error_message(&v);
+            return SponsoredReport::unknown_tdlib(format!("loadChats: {msg} (code {code})"));
+        }
+
+        if typ == "ok" && extra_for_match(&v).as_deref() == Some(extra.as_str()) {
+            saw_load_response = true;
+            continue;
+        }
+
+        if typ == "updateNewChat" {
+            if let Some(id) = chat_id_if_mtproto_sponsored_from_new_chat(&v) {
+                return SponsoredReport::yes_tdlib(id, "chatSourceMtprotoProxy in updateNewChat");
+            }
+        }
+
+        if typ == "updateChatPosition" {
+            if let Some(id) = chat_id_if_mtproto_sponsored_from_position_update(&v) {
+                return SponsoredReport::yes_tdlib(
+                    id,
+                    "chatSourceMtprotoProxy in updateChatPosition",
+                );
+            }
+        }
+    }
+
+    if saw_load_response {
+        SponsoredReport::unknown_tdlib(
+            "no chat with chatSourceMtprotoProxy observed before probe deadline",
+        )
+    } else {
+        SponsoredReport::unknown_tdlib("loadChats did not complete before probe deadline")
+    }
+}
+
+fn position_source_is_mtproto_proxy(pos: &Value) -> bool {
+    pos.pointer("/source/@type")
+        .and_then(|t| t.as_str())
+        == Some("chatSourceMtprotoProxy")
+}
+
+fn chat_id_if_mtproto_sponsored_from_new_chat(v: &Value) -> Option<i64> {
+    let chat = v.get("chat")?;
+    let arr = chat.get("positions")?.as_array()?;
+    for p in arr {
+        if position_source_is_mtproto_proxy(p) {
+            return chat.get("id").and_then(|x| x.as_i64());
+        }
+    }
+    None
+}
+
+fn chat_id_if_mtproto_sponsored_from_position_update(v: &Value) -> Option<i64> {
+    let pos = v.get("position")?;
+    if !position_source_is_mtproto_proxy(pos) {
+        return None;
+    }
+    v.get("chat_id").and_then(|x| x.as_i64())
 }
 
 #[allow(clippy::too_many_arguments)]

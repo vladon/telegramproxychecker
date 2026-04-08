@@ -6,10 +6,91 @@
 //! request to go **client → proxy → Telegram → back**, as measured by TDLib. It is **not** an
 //! ICMP ping, and it is **not** the raw TCP connect time to the proxy alone.
 
+use crate::error::ProbeError;
 use crate::proxy_link::{redact_sensitive_query_in_link, ProxyConfig, ProxyKind};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// MTProto sponsored-channel probe result (always included in JSON output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SponsoredStatus {
+    Yes,
+    No,
+    Unknown,
+}
+
+impl SponsoredStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Yes => "yes",
+            Self::No => "no",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SponsoredReport {
+    pub status: SponsoredStatus,
+    /// `"tdlib"` when TDLib was used for detection, `"none"` otherwise.
+    pub method: &'static str,
+    /// JSON `null` when unknown or not applicable.
+    pub channel_id: Option<i64>,
+    pub note: Option<String>,
+}
+
+impl SponsoredReport {
+    pub fn socks5_na() -> Self {
+        Self {
+            status: SponsoredStatus::Unknown,
+            method: "none",
+            channel_id: None,
+            note: Some("not applicable for socks5".into()),
+        }
+    }
+
+    pub fn yes_tdlib(channel_id: i64, note: impl Into<String>) -> Self {
+        Self {
+            status: SponsoredStatus::Yes,
+            method: "tdlib",
+            channel_id: Some(channel_id),
+            note: Some(note.into()),
+        }
+    }
+
+    pub fn unknown_tdlib(note: impl Into<String>) -> Self {
+        Self {
+            status: SponsoredStatus::Unknown,
+            method: "tdlib",
+            channel_id: None,
+            note: Some(note.into()),
+        }
+    }
+
+    pub fn unknown_none(note: impl Into<String>) -> Self {
+        Self {
+            status: SponsoredStatus::Unknown,
+            method: "none",
+            channel_id: None,
+            note: Some(note.into()),
+        }
+    }
+
+    fn on_probe_failure(proxy: &ProxyConfig, err: &ProbeError) -> Self {
+        match proxy.kind {
+            ProxyKind::Socks5 => Self::socks5_na(),
+            ProxyKind::Mtproto => match err {
+                ProbeError::Timeout(_) => Self::unknown_tdlib("probe timed out before sponsor detection"),
+                ProbeError::TdlibInit(_) => Self::unknown_none(
+                    "TDLib initialization failed; sponsor detection was not run",
+                ),
+                ProbeError::Internal(_) => Self::unknown_none("internal error during probe"),
+            },
+        }
+    }
+}
 
 /// Human-facing interpretation of latency or failure mode (verbose).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,13 +147,15 @@ pub struct ProbeReport {
     pub probe_end_wall_ms: u128,
     pub wall_duration: Duration,
     pub tdlib_reported_seconds: Option<f64>,
+    pub sponsored: SponsoredReport,
 }
 
 impl ProbeReport {
-    pub fn from_probe_failure(err: &crate::error::ProbeError) -> Self {
+    pub fn from_probe_failure(err: &ProbeError, proxy: &ProxyConfig) -> Self {
         let now = wall_ms();
+        let sponsored = SponsoredReport::on_probe_failure(proxy, err);
         match err {
-            crate::error::ProbeError::Timeout(ctx) => ProbeReport {
+            ProbeError::Timeout(ctx) => ProbeReport {
                 ok: false,
                 latency_ms: None,
                 error_message: Some("Timeout".to_string()),
@@ -83,8 +166,9 @@ impl ProbeReport {
                 probe_end_wall_ms: ctx.probe_end_wall_ms,
                 wall_duration: ctx.wall_duration,
                 tdlib_reported_seconds: None,
+                sponsored,
             },
-            crate::error::ProbeError::TdlibInit(s) => ProbeReport {
+            ProbeError::TdlibInit(s) => ProbeReport {
                 ok: false,
                 latency_ms: None,
                 error_message: Some(s.clone()),
@@ -95,8 +179,9 @@ impl ProbeReport {
                 probe_end_wall_ms: now,
                 wall_duration: Duration::ZERO,
                 tdlib_reported_seconds: None,
+                sponsored,
             },
-            crate::error::ProbeError::Internal(s) => ProbeReport {
+            ProbeError::Internal(s) => ProbeReport {
                 ok: false,
                 latency_ms: None,
                 error_message: Some(s.clone()),
@@ -107,6 +192,7 @@ impl ProbeReport {
                 probe_end_wall_ms: now,
                 wall_duration: Duration::ZERO,
                 tdlib_reported_seconds: None,
+                sponsored,
             },
         }
     }
@@ -128,6 +214,7 @@ struct JsonOk<'a> {
     port: u16,
     latency_ms: u64,
     message: &'static str,
+    sponsored: &'a SponsoredReport,
 }
 
 #[derive(Serialize)]
@@ -138,6 +225,7 @@ struct JsonFail<'a> {
     port: u16,
     error: &'a str,
     message: &'static str,
+    sponsored: &'a SponsoredReport,
 }
 
 pub fn render(
@@ -263,6 +351,18 @@ fn render_verbose_text(
         }
     }
     writeln!(w, "interpretation={}", report.interpretation.as_str())?;
+    writeln!(
+        w,
+        "sponsored_status={} sponsored_method={}",
+        report.sponsored.status.as_str(),
+        report.sponsored.method
+    )?;
+    if let Some(id) = report.sponsored.channel_id {
+        writeln!(w, "sponsored_channel_id={id}")?;
+    }
+    if let Some(n) = &report.sponsored.note {
+        writeln!(w, "sponsored_note={}", n)?;
+    }
     render_default_text(proxy, report, w)?;
     Ok(())
 }
@@ -278,6 +378,7 @@ fn render_json(proxy: &ProxyConfig, report: &ProbeReport, w: &mut impl Write) ->
             port: proxy.port,
             latency_ms: ms,
             message: "Telegram reachable through proxy",
+            sponsored: &report.sponsored,
         })
     } else {
         let err = report
@@ -291,6 +392,7 @@ fn render_json(proxy: &ProxyConfig, report: &ProbeReport, w: &mut impl Write) ->
             port: proxy.port,
             error: err,
             message: "Telegram unreachable through proxy",
+            sponsored: &report.sponsored,
         })
     }
     .map_err(io::Error::other)?;
@@ -359,6 +461,7 @@ mod tests {
             probe_end_wall_ms: 0,
             wall_duration: Duration::ZERO,
             tdlib_reported_seconds: Some(0.042),
+            sponsored: SponsoredReport::socks5_na(),
         };
         let mut buf = Vec::new();
         render_default_text(&proxy, &ok_rep, &mut buf).unwrap();
@@ -379,12 +482,52 @@ mod tests {
             probe_end_wall_ms: 0,
             wall_duration: Duration::ZERO,
             tdlib_reported_seconds: None,
+            sponsored: SponsoredReport::socks5_na(),
         };
         let mut buf = Vec::new();
         render_default_text(&proxy, &fail_rep, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.starts_with("FAIL type=socks5 server=1.2.3.4 port=1080 error=\""));
         assert!(s.contains(r#"bad\"m"#));
+    }
+
+    #[test]
+    fn json_includes_sponsored_object() {
+        let proxy = ProxyConfig {
+            original_input: String::new(),
+            kind: ProxyKind::Mtproto,
+            server: "1.2.3.4".into(),
+            port: 443,
+            mtproto_secret: Some("ab".into()),
+            socks_username: None,
+            socks_password: None,
+        };
+        let rep = ProbeReport {
+            ok: true,
+            latency_ms: Some(320),
+            error_message: None,
+            interpretation: Interpretation::ReachableModerateLatency,
+            auth_states_seen: vec![],
+            tdlib_log_lines: vec![],
+            probe_start_wall_ms: 0,
+            probe_end_wall_ms: 0,
+            wall_duration: Duration::ZERO,
+            tdlib_reported_seconds: Some(0.32),
+            sponsored: SponsoredReport::yes_tdlib(123456789_i64, "promo peer detected"),
+        };
+        let mut buf = Vec::new();
+        render_json(
+            &proxy,
+            &rep,
+            &mut buf,
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(v["sponsored"]["status"], "yes");
+        assert_eq!(v["sponsored"]["method"], "tdlib");
+        assert_eq!(v["sponsored"]["channel_id"], 123456789);
+        assert_eq!(v["sponsored"]["note"], "promo peer detected");
     }
 
     #[test]
@@ -409,6 +552,7 @@ mod tests {
             probe_end_wall_ms: 20,
             wall_duration: Duration::from_millis(5),
             tdlib_reported_seconds: Some(0.001),
+            sponsored: SponsoredReport::socks5_na(),
         };
         let opts = RenderOpts {
             verbose: true,

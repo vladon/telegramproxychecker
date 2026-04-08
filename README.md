@@ -69,13 +69,15 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 **JSON success:**
 
 ```json
-{"ok":true,"proxy_type":"mtproto","server":"1.2.3.4","port":443,"latency_ms":412,"message":"Telegram reachable through proxy"}
+{"ok":true,"proxy_type":"mtproto","server":"1.2.3.4","port":443,"latency_ms":412,"message":"Telegram reachable through proxy","sponsored":{"status":"unknown","method":"tdlib","channel_id":null,"note":"no chat with chatSourceMtprotoProxy observed before probe deadline"}}
 ```
+
+The **`sponsored`** object is always present. For **MTProto**, the tool calls TDLib **`loadChats`** after a successful **`pingProxy`** and treats a chat whose position has **`chatSourceMtprotoProxy`** as a sponsored promo channel (`status: "yes"`). If TDLib never delivers such an update before `--timeout`, `status` is **`unknown`** (not **`no`**—absence of updates is not proof there is no sponsor). For **SOCKS5**, `status` is always **`unknown`** with `method: "none"`.
 
 **JSON failure:**
 
 ```json
-{"ok":false,"proxy_type":"socks5","server":"1.2.3.4","port":1080,"error":"Proxy connection failed","message":"Telegram unreachable through proxy"}
+{"ok":false,"proxy_type":"socks5","server":"1.2.3.4","port":1080,"error":"Proxy connection failed","message":"Telegram unreachable through proxy","sponsored":{"status":"unknown","method":"none","channel_id":null,"note":"not applicable for socks5"}}
 ```
 
 ## Exit codes

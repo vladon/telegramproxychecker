@@ -28,7 +28,7 @@ Query parameters are URL-decoded. For `--verbose` text output, `input_link=` sho
 
 ## Usage
 
-With default features, **`cargo build`** downloads a pinned TDLib source tarball (or uses `third_party/td` if present), compiles it with CMake, and links it automatically—see [Native prerequisites](#native-prerequisites). Use `cargo build --no-default-features` for a parser-only binary without compiling TDLib.
+With default features, **`cargo build`** compiles TDLib from **`third_party/td`** (recommended: git submodule at the pinned commit) or, if that tree is empty, from a **pinned** downloaded archive under `target/`—see [Vendored TDLib](#vendored-tdlib-build) and [Native prerequisites](#native-prerequisites). Use `cargo build --no-default-features` for a parser-only binary without compiling TDLib.
 
 ```bash
 export TG_API_ID="123456"
@@ -89,10 +89,43 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 
 ## Vendored TDLib build
 
-TDLib is **not** expected to be installed system-wide. `build.rs` uses **CMake** to compile a **pinned** upstream revision ([`v1.8.0`](https://github.com/tdlib/td/tree/v1.8.0) / commit `b3ab664a18f8611f4dfcd3054717504271eeaa7a`) into `target/*/build/.../out/`.
+TDLib is **vendored and built by Cargo**. You do **not** clone TDLib separately, run CMake by hand, or install `libtdjson.so` (or any TDLib library) into `/usr/lib` or similar.
 
-- **Source:** If `third_party/td/CMakeLists.txt` exists (recommended: git submodule; see [`third_party/README.md`](third_party/README.md)), that tree is used. Otherwise the same commit is fetched as a GitHub tarball (SHA-256 checked in `build.rs`).
-- **Linking:** On **Linux**, the Rust binary links **static** TDLib JSON archives (`tdjson_static` and dependencies) and uses the system **OpenSSL**, **zlib**, **libzstd**, **`libstdc++`**, and **`pthread`** shared libraries. On **macOS** and **Windows**, the build links the **shared** `tdjson` library produced by CMake and sets an **rpath** (macOS/Linux shared fallback) or copies **`tdjson.dll`** next to the executable under `target/<profile>/` (Windows).
+### Source tree
+
+- **Normal / reproducible path:** check out TDLib under **`third_party/td`** at the pinned commit (see [`third_party/README.md`](third_party/README.md)). `build.rs` runs CMake against that directory.
+- **Bootstrap path:** if `third_party/td` has no `CMakeLists.txt`, `build.rs` downloads the **same** pinned commit as a tarball into `target/<triplet>/<profile>/build/tg-proxy-check-*/out/td-src/`, verifies SHA-256, then builds. That needs `curl` or `wget` once.
+
+Pinned revision: **[`v1.8.0`](https://github.com/tdlib/td/tree/v1.8.0)** (commit `b3ab664a18f8611f4dfcd3054717504271eeaa7a`), defined as `TD_COMMIT` in `build.rs`.
+
+### Where native artifacts go
+
+| Stage | Location (under `target/.../build/tg-proxy-check-<hash>/out/`) |
+|--------|------------------------------------------------------------------|
+| CMake build tree | `tdlib-cmake/build/` |
+| `cmake --install` prefix | `tdlib-install/` (libraries in `tdlib-install/lib/`) |
+| Tarball extract (if used) | `td-src/td-<commit>/` |
+
+Nothing in this flow writes under `third_party/` except your own git submodule checkout.
+
+### CMake driver
+
+`build.rs` uses the Rust [**`cmake`**](https://crates.io/crates/cmake) crate so generator selection, compiler flags, and MSVC `--config` handling match common Rust native-build practice. The CMake target **`install`** is built so `tdjson` and `tdjson_static` (and dependencies) are produced consistently before files are installed into `tdlib-install/`.
+
+### Linkage (no system `libtdjson`)
+
+`build.rs` prints **`cargo:rustc-link-search=native=…/tdlib-install/lib`** and links the **locally installed** artifacts only:
+
+| Platform | Strategy |
+|----------|-----------|
+| **Linux** (glibc, default) | Static chain: `libtdjson_static.a` + other TDLib `libtd*.a` inside `-Wl,--start-group` / `--end-group`, then dynamic **OpenSSL**, **zlib**, optional **zstd** (if TDLib was built with zstd), **dl**, **pthread**, **libstdc++**. |
+| **macOS** (default) | Same static `.a` list, linked with **`-Wl,-force_load,…`** per archive (macOS `ld` has no `--start-group`), then **ssl/crypto/z** and **`libc++`**. |
+| **Linux musl** | **Shared** `libtdjson.so` from the same install prefix + **rpath** to that directory (static `libstdc++/OpenSSL` pairing on musl is not the default here). |
+| **Windows** | **Shared** `tdjson`; import library from `tdlib-install/lib`; **`tdjson.dll`** is copied into `target/<debug\|release>/` for `cargo run`. |
+
+Optional: **`TDLIB_LINK_SHARED=1`** on glibc Linux forces the **local shared** `libtdjson.so` + rpath instead of the static `.a` chain (debugging or unusual link environments).
+
+Rust FFI lives in `src/tdjson_sys.rs`; symbols are resolved from the paths above—there is no `#[link(name = "tdjson")]` relying on a system search path.
 
 ### `td_send` and memory safety
 
@@ -115,9 +148,9 @@ You need a normal **native toolchain**; nothing from TDLib has to be pre-install
 | **zlib** | Dev package (`zlib1g-dev`, Xcode CLT, etc.). |
 | **gperf** | Required by TDLib code generation (`apt install gperf`, Homebrew `gperf`, etc.). |
 | **libzstd** | Often pulled in by TDLib for compression; install dev package if the link step reports missing `zstd`. |
-| **curl** or **wget** | Used by `build.rs` to download the pinned tarball when `third_party/td` is not populated. |
+| **curl** or **wget** | Only if `third_party/td` is not populated: first-time download of the pinned tarball. |
 
-Optional: **`TDLIB_LINK_SHARED=1`** on Linux forces linking the built **`libtdjson.so`** instead of the static `.a` chain (debugging only).
+Use a **`third_party/td`** submodule to avoid network fetch during builds.
 
 ## Build instructions
 
@@ -127,7 +160,7 @@ Optional: **`TDLIB_LINK_SHARED=1`** on Linux forces linking the built **`libtdjs
 cargo build --release
 ```
 
-The first build compiles TDLib and can take **several minutes** and several GB under `target/`. Later `cargo build` runs are incremental.
+The first build compiles TDLib and can take **several minutes** and several GB under `target/`. Later `cargo build` runs are incremental (CMake + Ninja/Make reuse the tree under `out/tdlib-cmake/build` until the source path or options change).
 
 **Parser-only (no CMake / no TDLib compile):**
 
@@ -155,9 +188,11 @@ Install **CMake**, a C++ toolchain (**Visual Studio Build Tools** with C++ workl
 
 ### Platform caveats
 
-- **musl / Alpine:** Static linking `libstdc++` into a fully static binary is not what this `build.rs` targets; prefer **glibc** Linux for the default static-TDLib path, or set **`TDLIB_LINK_SHARED=1`** and ensure a compatible `libtdjson.so` + `libstdc++.so` at run time.
-- **Windows + MSVC:** Use a **x64** native toolchain consistent with Rust’s `x86_64-pc-windows-msvc` target.
-- **Air-gapped builds:** Add the TDLib tree as **`third_party/td`** at the pinned commit so `build.rs` does not download anything (see `third_party/README.md`).
+- **musl / Alpine:** The build selects the **shared** `libtdjson.so` from `tdlib-install/lib` and sets **rpath** to that directory; do not strip `target/` if you rely on that path, or ship `libtdjson.so` next to your binary and adjust the loader.
+- **Windows + MSVC:** Use an **x64** toolchain consistent with Rust’s `x86_64-pc-windows-msvc` target. Set **`OPENSSL_ROOT_DIR`** if CMake cannot find OpenSSL.
+- **Windows + GNU:** `windows-gnu` may use different import-library names; if linking fails, try MSVC target or report an issue with the exact linker error.
+- **macOS + Homebrew OpenSSL:** If CMake finds OpenSSL but the **Rust** link step cannot find `-lssl`, export library search paths (e.g. `LIBRARY_PATH` / `RUSTFLAGS=-L...`) pointing at the same prefix you pass as **`OPENSSL_ROOT_DIR`**.
+- **Air-gapped / CI:** Use **`third_party/td`** at the pinned commit so no tarball download runs.
 
 ## Troubleshooting
 
@@ -183,16 +218,24 @@ Install **CMake**, a C++ toolchain (**Visual Studio Build Tools** with C++ workl
 
 ### Native build / CMake failures
 
-- **“Could NOT find OpenSSL”:** Install OpenSSL development files and/or set **`OPENSSL_ROOT_DIR`**.
-- **“Could NOT find gperf”:** Install `gperf` and ensure it is on `PATH`.
-- **Missing `zstd` at link time:** Install `libzstd` development package.
-- **Download failures:** Install `curl` or `wget`, or populate **`third_party/td`** as a submodule (see `third_party/README.md`).
-- **Stale CMake cache after changing TDLib source:** `cargo clean` and rebuild.
+| Symptom | What to do |
+|---------|------------|
+| **`cmake` not found** | Install CMake 3.10+ and ensure it is on `PATH` (or set **`CMAKE`** to the `cmake` binary). |
+| **C/C++ compiler not found** | Install a toolchain (GCC/Clang, Xcode CLT, or MSVC Build Tools). The `cmake` crate forwards the same compilers Cargo uses for the target. |
+| **Could NOT find OpenSSL** | Install dev packages (`libssl-dev`, Homebrew `openssl`, Windows Shining Light build) and/or set **`OPENSSL_ROOT_DIR`**. |
+| **Could NOT find gperf** | Install `gperf` (TDLib code generation). |
+| **zlib not found** | Install zlib development package (`zlib1g-dev`, etc.). |
+| **Download / network error** | Add **`third_party/td`** at the pinned commit (`third_party/README.md`) so no download runs. |
+| **Wrong generator on Windows** | Set **`CMAKE_GENERATOR`** (e.g. `Ninja` or a Visual Studio generator) if auto-detection fails. |
+| **CMake “home dir change” / weird cache** | `cargo clean -p tg-proxy-check` (or full `cargo clean`) and rebuild. |
 
-### Runtime loader issues (shared `tdjson` path)
+### Runtime loader issues (shared `tdjson` only)
 
-- **macOS** builds using the shared library embed an **rpath** to the TDLib install directory under `target/*/build/.../out/`. Do not delete `target/` before running binaries that depend on that path, or ship **`libtdjson.dylib`** with your binary and adjust loader paths.
-- **Windows:** The build copies **`tdjson.dll`** into `target/<profile>/`. For distribution, ship **`tdjson.dll`** next to **`tg-proxy-check.exe`**.
+Applies to **Windows**, **Linux musl**, **`TDLIB_LINK_SHARED=1`**, or any path where the **shared** `tdjson` library is linked:
+
+- **Linux:** **rpath** points at `…/out/tdlib-install/lib`. If you move the binary without that tree, set **`LD_LIBRARY_PATH`** to that `lib` directory or copy **`libtdjson.so`** (and compatible OpenSSL/zlib) next to the binary.
+- **macOS (shared mode):** Same idea with **`libtdjson.dylib`** and **`DYLD_LIBRARY_PATH`** / install names if you relocate the binary.
+- **Windows:** **`tdjson.dll`** is copied to **`target/<profile>/`** during build; for distribution, keep **`tdjson.dll`** beside **`tg-proxy-check.exe`**.
 
 ## Development
 
@@ -207,6 +250,6 @@ cargo clippy --all-targets -- -D warnings
 
 ## Design note (FFI)
 
-- **Approach:** `build.rs` vendors and compiles **TDLib** with CMake; low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles the `pingProxy` / authorization flow. Raw FFI + `serde_json` avoids immature bindings while keeping full control over `@extra` correlation and the authorization-state sequence.
-- **Pinned version:** Upstream tag **`v1.8.0`** (commit `b3ab664a18f8611f4dfcd3054717504271eeaa7a`); bump deliberately in `build.rs` / `third_party/README.md` when upgrading.
+- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → `OUT_DIR/tdlib-install`). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles `pingProxy` / authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
+- **Pinned version:** Upstream tag **`v1.8.0`** (commit `b3ab664a18f8611f4dfcd3054717504271eeaa7a`); bump `TD_COMMIT` / `TD_TARBALL_SHA256` / submodule instructions together when upgrading.
 - **Caveats:** All `td_receive` calls run on **one thread**; the pointer returned by `td_receive` is only valid until the next `td_receive` / `td_execute` on that thread—this implementation copies the string immediately. Temporary TDLib database directories are created under the system temp folder per run. Every exit path after `td_create_client_id` runs `close` and clears the log callback so the next probe in-process does not inherit state. Timeouts carry a `ProbeTimeoutContext` so verbose output still shows elapsed time and authorization states reached.

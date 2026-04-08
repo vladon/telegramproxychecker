@@ -1,4 +1,8 @@
 //! Raw [tdjson](https://github.com/tdlib/td) C API. All `unsafe` for FFI stays in this module.
+//!
+//! The TDLib JSON client is linked by `build.rs` from the CMake install under `OUT_DIR` (static
+//! archives on Linux/BSD, or the built `tdjson` shared library when using the shared fallback).
+//! There is no `#[link(name = "tdjson")]` attribute—search paths come from `cargo:rustc-link-search`.
 
 use std::ffi::{CStr, CString};
 use std::time::Duration;

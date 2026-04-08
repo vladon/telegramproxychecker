@@ -78,6 +78,9 @@ fn main() {
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_triple = env::var("TARGET").unwrap_or_default();
+    // `CARGO_CFG_TARGET_ENV` can be unset in some toolchains; `TARGET` is always the package target.
+    let is_musl_target = target_env == "musl" || target_triple.contains("musl");
     let msvc = target_env == "msvc";
 
     let variant_raw = env::var("TDLIB_BUILD_VARIANT").unwrap_or_else(|_| "default".into());
@@ -105,23 +108,31 @@ fn main() {
     if let Ok(root) = env::var("OPENSSL_ROOT_DIR") {
         if !root.is_empty() {
             cfg.define("OPENSSL_ROOT_DIR", root.as_str());
-            // Musl static TDLib sets `-static` in CMAKE_*_FLAGS; FindZLIB's try_compile then fails
-            // even though zlib is installed next to OpenSSL (e.g. /musl-local from cross-prebuild).
-            if target_env == "musl" {
+            // Musl static TDLib sets `-static` in CMAKE_*_FLAGS; FindZLIB's try_compile then fails.
+            // zlib lives next to OpenSSL in the cross image (/musl-local from scripts/cross-prebuild-musl.sh).
+            // Do not `is_file()`/`is_dir()` gate these: the build script may run on the GitHub host
+            // where /musl-local is absent, while CMake runs in the cross container where it exists.
+            if is_musl_target {
                 cfg.define("ZLIB_ROOT", root.as_str());
                 let prefix = PathBuf::from(&root);
                 let zlib_inc = prefix.join("include");
                 let zlib_lib = prefix.join("lib").join("libz.a");
-                if zlib_inc.is_dir() {
-                    if let Some(s) = zlib_inc.to_str() {
-                        cfg.define("ZLIB_INCLUDE_DIR", s);
-                    }
-                }
-                if zlib_lib.is_file() {
-                    if let Some(s) = zlib_lib.to_str() {
-                        cfg.define("ZLIB_LIBRARY", s);
-                    }
-                }
+                let zlib_lib64 = prefix.join("lib64").join("libz.a");
+                let zlib_library = if zlib_lib.is_file() || !zlib_lib64.is_file() {
+                    zlib_lib
+                } else {
+                    zlib_lib64
+                };
+                cfg.define(
+                    "ZLIB_INCLUDE_DIR",
+                    zlib_inc.to_str().expect("ZLIB_INCLUDE_DIR path must be UTF-8"),
+                );
+                cfg.define(
+                    "ZLIB_LIBRARY",
+                    zlib_library
+                        .to_str()
+                        .expect("ZLIB_LIBRARY path must be UTF-8"),
+                );
             }
         }
     }

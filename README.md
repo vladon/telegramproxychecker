@@ -181,6 +181,12 @@ The default `tdlib` Cargo feature links TDLib; disabling default features skips 
 
 ### TDLib linking and runtime failures
 
+**Build stops in `build.rs` with “Could not find `tdjson` for linking”**
+
+- This is intentional: the script refuses to invoke the linker with bare `-ltdjson` when neither `TDLIB_LIB_DIR` nor `pkg-config tdjson` provides a library path (that case used to fail with a cryptic `unable to find library -ltdjson`).
+- Set `TDLIB_LIB_DIR` to the directory that contains `libtdjson.so` (or the platform equivalent), then `cargo build --release` again.
+- If you deliberately link only via `RUSTFLAGS=-L...`, either set `TDLIB_LIB_DIR` to that same directory or set `TDLIB_ALLOW_BARE_LINK=1` to opt back into bare `-ltdjson`.
+
 **Link step: “cannot find `-ltdjson`” / unresolved `td_create_client_id`**
 
 - Set `TDLIB_LIB_DIR` to the directory containing the import library / `.so` / `.dylib`, then rebuild.

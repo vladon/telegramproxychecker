@@ -11,6 +11,7 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-env-changed=TDLIB_LIB_DIR");
     println!("cargo:rerun-if-env-changed=TDLIB_STATIC");
+    println!("cargo:rerun-if-env-changed=TDLIB_ALLOW_BARE_LINK");
 
     if env::var("CARGO_FEATURE_TDLIB").is_err() {
         println!("cargo:warning=Building without `tdlib` feature: TDLib is not linked; probe_proxy will report a build-time error.");
@@ -47,7 +48,28 @@ fn main() {
         return;
     }
 
-    // Default: dynamic link; linker searches default paths / LIBRARY_PATH / PATH.
-    println!("cargo:warning=tdjson: TDLIB_LIB_DIR not set and pkg-config did not find tdjson; linking with -ltdjson (ensure the library is on the linker path).");
-    println!("cargo:rustc-link-lib=dylib={}", lib_name);
+    // Without a link-search path, `-ltdjson` almost always fails with an opaque "unable to find
+    // library" from the linker. Fail here with actionable instructions instead.
+    if env::var("TDLIB_ALLOW_BARE_LINK").as_deref() == Ok("1") {
+        println!("cargo:warning=tdjson: TDLIB_ALLOW_BARE_LINK=1: linking with -ltdjson only (you must supply -L via RUSTFLAGS or a default linker path).");
+        println!("cargo:rustc-link-lib=dylib={}", lib_name);
+        return;
+    }
+
+    panic!(
+        "\n\
+Could not find `tdjson` for linking (TDLib JSON client).\n\
+\n\
+Fix one of:\n\
+  • Point the build at the library directory:\n\
+      export TDLIB_LIB_DIR=/path/to/dir/containing/libtdjson.so\n\
+      cargo build --release\n\
+  • Install TDLib with a pkg-config file named `tdjson` (so `pkg-config --libs tdjson` works).\n\
+  • Build without linking TDLib (parser / CI only):\n\
+      cargo build --release --no-default-features\n\
+\n\
+Advanced: if you already pass the library directory via RUSTFLAGS (e.g. -L/path), either set\n\
+TDLIB_LIB_DIR to that same path so this script emits link search metadata, or set\n\
+TDLIB_ALLOW_BARE_LINK=1 to restore bare `-ltdjson`.\n"
+    );
 }

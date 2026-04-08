@@ -92,8 +92,6 @@ jobs:
     needs: validate-tag
     runs-on: ubuntu-22.04
     timeout-minutes: 180
-    container:
-      image: rust:1.94.1-alpine
     strategy:
       fail-fast: false
       matrix:
@@ -117,19 +115,32 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
+      MUSL_TARGET_DIR: target/x86_64-unknown-linux-musl/release
     steps:
-      - name: Install Alpine dependencies
-        run: |
-          apk add --no-cache bash build-base cmake ninja git curl ca-certificates \
-            openssl-dev openssl-libs-static zlib-dev zlib-static zstd-dev \
-            gperf perl linux-headers pkgconf patchelf
-
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: recursive
 
-      - name: cargo build --release
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
+
+      - name: Install host tools (patchelf for shared musl bundles)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: cargo build --release (cross musl)
         env:
           TDLIB_BUILD_VARIANT: ${{ matrix.tdlib_variant }}
           RUSTFLAGS: ${{ matrix.rustflags }}
@@ -138,16 +149,17 @@ jobs:
             export OPENSSL_STATIC=1
             export TDLIB_LINK_SSL_STATIC=1
           fi
-          cargo build --release
+          cross build --release --target x86_64-unknown-linux-musl
 
       - name: Patchelf (shared tdjson) / verify static
         run: |
           chmod +x scripts/find-libtdjson.sh scripts/package-release-artifact.sh scripts/verify-fully-static.sh
+          BIN="$MUSL_TARGET_DIR/tg-proxy-check"
           if [ "${{ matrix.static }}" = "true" ]; then
-            scripts/verify-fully-static.sh target/release/tg-proxy-check
+            scripts/verify-fully-static.sh "$BIN"
           else
-            TDJSON="$(scripts/find-libtdjson.sh target/release)"
-            patchelf --set-rpath '$ORIGIN' target/release/tg-proxy-check
+            TDJSON="$(scripts/find-libtdjson.sh "$MUSL_TARGET_DIR")"
+            patchelf --set-rpath '$ORIGIN' "$BIN"
           fi
 
       - name: Package
@@ -155,11 +167,12 @@ jobs:
           VERSION: ${{ needs.validate-tag.outputs.version }}
         run: |
           NAME="tg-proxy-check-${VERSION}-${{ matrix.suffix }}"
+          BIN="$MUSL_TARGET_DIR/tg-proxy-check"
           if [ "${{ matrix.static }}" = "true" ]; then
-            scripts/package-release-artifact.sh dist "$NAME" target/release/tg-proxy-check
+            scripts/package-release-artifact.sh dist "$NAME" "$BIN"
           else
-            TDJSON="$(scripts/find-libtdjson.sh target/release)"
-            scripts/package-release-artifact.sh dist "$NAME" target/release/tg-proxy-check "$TDJSON"
+            TDJSON="$(scripts/find-libtdjson.sh "$MUSL_TARGET_DIR")"
+            scripts/package-release-artifact.sh dist "$NAME" "$BIN" "$TDJSON"
           fi
 
       - uses: actions/upload-artifact@v4

@@ -1,0 +1,14 @@
+# Used by `cross` for release musl builds (GitHub Actions). Host is glibc; target is musl so
+# proc-macros build for the host while the final binary is musl-linked.
+[build.env]
+passthrough = [
+    "TDLIB_BUILD_VARIANT",
+    "TDLIB_LINK_SSL_STATIC",
+    "OPENSSL_STATIC",
+    "RUSTFLAGS",
+]
+
+[target.x86_64-unknown-linux-musl]
+pre-build = [
+    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gperf",
+]

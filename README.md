@@ -191,7 +191,7 @@ Prebuilt Linux **x86_64** archives are produced **only** when you push a **git t
   - `tg-proxy-check-1.2.3-linux-x86_64-musl-static.tar.gz` — **fully static** musl binary (`ldd` must report a static executable); OpenSSL/TDLib linked statically for CI.
   - `tg-proxy-check-1.2.3-linux-x86_64-musl-v3-static.tar.gz` — fully static + x86-64-v3.
 
-Workflows live under [`.github/workflows/`](.github/workflows/): **`release.yml`** runs the full release matrix on matching tags; **`ci.yml`** runs lightweight `fmt` / `clippy` / `cargo test --no-default-features` on pushes and PRs to `main` or `master` only (no TDLib compile).
+Workflows live under [`.github/workflows/`](.github/workflows/): **`release.yml`** runs the full release matrix on matching tags; **`ci.yml`** runs lightweight `fmt` / `clippy` / `cargo test --no-default-features` on pushes and PRs to `main` or `master` only (no TDLib compile). **Musl** release jobs use [**cross-rs**](https://github.com/cross-rs/cross) on Ubuntu (glibc-hosted Cargo with `--target x86_64-unknown-linux-musl`) because a **musl-only** Rust host cannot build procedural macros such as `clap_derive` (see [`Cross.toml`](Cross.toml)).
 
 #### Local / Makefile matrix
 
@@ -211,7 +211,7 @@ Artifacts land in **`dist/`**:
 | `build-musl` | `tg-proxy-check-linux-x86_64-musl` | musl + shared `libtdjson.so`; `dist/libtdjson-linux-x86_64-musl.so` copied for shipping |
 | `build-gnu-v3` | `tg-proxy-check-linux-x86_64-gnu-v3` | **`RUSTFLAGS=-C target-cpu=x86-64-v3`** (needs CPU with v3 features at runtime) |
 | `build-musl-v3` | `tg-proxy-check-linux-x86_64-musl-v3` | musl + v3 + shared tdjson |
-| `build-musl-static` | `tg-proxy-check-linux-x86_64-musl-static` | **`+crt-static`** Rust; static TDLib; **`scripts/verify-static.sh`** ensures **no dynamic `libtdjson`** |
+| `build-musl-static` | `tg-proxy-check-linux-x86_64-musl-static` | **`+crt-static`** Rust; static TDLib; **`scripts/verify-fully-static.sh`** ensures **no dynamic `libtdjson`** |
 | `build-musl-v3-static` | `tg-proxy-check-linux-x86_64-musl-v3-static` | v3 + static tdjson + verification |
 
 Per-variant: `make build-gnu`, `make build-musl`, etc.

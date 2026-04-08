@@ -38,6 +38,8 @@ tg-proxy-check 'tg://proxy?server=1.2.3.4&port=443&secret=...'
 tg-proxy-check --proxy-link 'https://t.me/socks?server=1.2.3.4&port=1080'
 ```
 
+**Shell note (bash/zsh):** `&` starts a background job. If you paste a `tg://…` link **without quotes**, only the part before the first `&` is passed as one argument; you may see `missing or empty port parameter` and job numbers like `[1] 85682`. Always **quote the whole URL** (single quotes are safest).
+
 ### Flags
 
 | Flag | Meaning |

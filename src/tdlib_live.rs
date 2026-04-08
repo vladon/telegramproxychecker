@@ -5,7 +5,8 @@
 //!
 //! Without `--auth-session`, the add/ping sequence starts once TDLib reports
 //! `authorizationStateWaitPhoneNumber`, or right after a successful `checkDatabaseEncryptionKey`
-//! `ok`. With `--auth-session`, login prompts on stdin until `authorizationStateReady`, then add/ping.
+//! `ok`. With `--auth-session`, `addProxy` runs after the DB encryption check so login traffic can
+//! use the proxy; `pingProxy` runs only after `authorizationStateReady`.
 
 use super::tdjson_sys;
 use super::{TdlibCredentials, TdlibProbeSettings};
@@ -123,7 +124,16 @@ fn client_matches(v: &Value, client_id: i32) -> bool {
 }
 
 fn auth_state_from_update(v: &Value) -> Option<String> {
-    v.pointer("/authorization_state/@type")
+    if let Some(s) = v
+        .pointer("/authorization_state/@type")
+        .and_then(|t| t.as_str())
+    {
+        return Some(s.to_string());
+    }
+    let inner = v.get("authorization_state").or_else(|| v.get("authorizationState"))?;
+    inner
+        .get("@type")
+        .or_else(|| inner.get("type"))
         .and_then(|t| t.as_str())
         .map(String::from)
 }
@@ -279,6 +289,8 @@ pub fn probe_proxy(
     let mut ping_extra: Option<String> = None;
     let mut ping_result: Option<Result<f64, String>> = None;
     let mut authorization_state: Option<String> = None;
+    // `--auth-session`: addProxy after DB unlock (login uses proxy); ping only after Ready.
+    let mut registered_proxy_id: Option<i32> = None;
     let interactive_auth = settings.auth_session.is_some();
 
     let extra_auth = next_extra("getAuthorizationState");
@@ -346,6 +358,7 @@ pub fn probe_proxy(
                         &mut add_proxy_extra,
                         &mut ping_extra,
                         &mut ping_result,
+                        &mut registered_proxy_id,
                     ) {
                         td_shutdown_session(client_id);
                         return Err(e);
@@ -371,6 +384,7 @@ pub fn probe_proxy(
                     &mut add_proxy_extra,
                     &mut ping_extra,
                     &mut ping_result,
+                    &mut registered_proxy_id,
                 ) {
                     td_shutdown_session(client_id);
                     return Err(e);
@@ -408,6 +422,8 @@ pub fn probe_proxy(
                 if ex.starts_with("setAuthenticationPhoneNumber-")
                     || ex.starts_with("checkAuthenticationCode-")
                     || ex.starts_with("checkAuthenticationPassword-")
+                    || ex.starts_with("setAuthenticationEmailAddress-")
+                    || ex.starts_with("checkAuthenticationEmailCode-")
                 {
                     td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
@@ -415,7 +431,7 @@ pub fn probe_proxy(
             }
             "ok" => {
                 let ex = extra_for_match(&v).unwrap_or_default();
-                if ex.starts_with("checkDatabaseEncryptionKey-") && !interactive_auth {
+                if ex.starts_with("checkDatabaseEncryptionKey-") {
                     if let Err(e) = try_start_proxy_ping(
                         client_id,
                         proxy,
@@ -434,6 +450,9 @@ pub fn probe_proxy(
                     if let Err(e) = on_add_proxy_response(
                         client_id,
                         &v,
+                        interactive_auth,
+                        &authorization_state,
+                        &mut registered_proxy_id,
                         &mut add_proxy_extra,
                         &mut ping_extra,
                         &mut ping_result,
@@ -814,6 +833,7 @@ fn handle_auth_state(
     add_proxy_extra: &mut Option<String>,
     ping_extra: &mut Option<String>,
     ping_result: &mut Option<Result<f64, String>>,
+    registered_proxy_id: &mut Option<i32>,
 ) -> Result<(), ProbeError> {
     match state {
         "authorizationStateWaitTdlibParameters" if !*set_params_sent => {
@@ -884,6 +904,47 @@ fn handle_auth_state(
                 .map_err(|e| ProbeError::Internal(format!("serialize checkAuthenticationCode: {e}")))?;
             send_raw(client_id, &s)?;
         }
+        "authorizationStateWaitEmailAddress" if interactive_auth => {
+            let email = read_auth_line(
+                "Enter email address:\n",
+                deadline,
+                probe_start,
+                probe_start_wall_ms,
+                auth_states_seen,
+            )?;
+            let extra = next_extra("setAuthenticationEmailAddress");
+            let req = json!({
+                "@type": "setAuthenticationEmailAddress",
+                "email_address": email,
+                "@extra": extra,
+            });
+            let s = serde_json::to_string(&req).map_err(|e| {
+                ProbeError::Internal(format!("serialize setAuthenticationEmailAddress: {e}"))
+            })?;
+            send_raw(client_id, &s)?;
+        }
+        "authorizationStateWaitEmailCode" if interactive_auth => {
+            let code = read_auth_line(
+                "Enter email code:\n",
+                deadline,
+                probe_start,
+                probe_start_wall_ms,
+                auth_states_seen,
+            )?;
+            let extra = next_extra("checkAuthenticationEmailCode");
+            let req = json!({
+                "@type": "checkAuthenticationEmailCode",
+                "code": {
+                    "@type": "emailAddressAuthenticationCode",
+                    "code": code,
+                },
+                "@extra": extra,
+            });
+            let s = serde_json::to_string(&req).map_err(|e| {
+                ProbeError::Internal(format!("serialize checkAuthenticationEmailCode: {e}"))
+            })?;
+            send_raw(client_id, &s)?;
+        }
         "authorizationStateWaitPassword" if interactive_auth => {
             let password = read_auth_line(
                 "Enter 2FA password:\n",
@@ -904,13 +965,17 @@ fn handle_auth_state(
             send_raw(client_id, &s)?;
         }
         "authorizationStateReady" if interactive_auth => {
-            try_start_proxy_ping(
-                client_id,
-                proxy,
-                add_proxy_extra,
-                ping_extra,
-                ping_result,
-            )?;
+            if let Some(id) = *registered_proxy_id {
+                send_ping_with_proxy_id(client_id, id, ping_extra, ping_result)?;
+            } else if add_proxy_extra.is_none() && ping_extra.is_none() {
+                try_start_proxy_ping(
+                    client_id,
+                    proxy,
+                    add_proxy_extra,
+                    ping_extra,
+                    ping_result,
+                )?;
+            }
         }
         _ => {}
     }
@@ -940,6 +1005,9 @@ fn try_start_proxy_ping(
 fn on_add_proxy_response(
     client_id: i32,
     v: &Value,
+    interactive_auth: bool,
+    authorization_state: &Option<String>,
+    registered_proxy_id: &mut Option<i32>,
     add_proxy_extra: &mut Option<String>,
     ping_extra: &mut Option<String>,
     ping_result: &mut Option<Result<f64, String>>,
@@ -950,7 +1018,15 @@ fn on_add_proxy_response(
         .and_then(|i| i32::try_from(i).ok())
         .ok_or_else(|| ProbeError::Internal("addProxy response missing id".into()))?;
     *add_proxy_extra = None;
-    send_ping_with_proxy_id(client_id, id, ping_extra, ping_result)
+    if interactive_auth {
+        *registered_proxy_id = Some(id);
+        if authorization_state.as_deref() == Some("authorizationStateReady") {
+            send_ping_with_proxy_id(client_id, id, ping_extra, ping_result)?;
+        }
+    } else {
+        send_ping_with_proxy_id(client_id, id, ping_extra, ping_result)?;
+    }
+    Ok(())
 }
 
 fn send_ping_with_proxy_id(

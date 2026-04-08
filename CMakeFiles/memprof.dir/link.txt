@@ -1,0 +1,2 @@
+ccache /usr/bin/ar qc libmemprof.a CMakeFiles/memprof.dir/memprof/memprof.cpp.o
+ccache /usr/bin/ranlib libmemprof.a

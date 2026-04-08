@@ -26,23 +26,25 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Pinned TDLib revision (upstream tag `v1.8.0`).
-const TD_COMMIT: &str = "b3ab664a18f8611f4dfcd3054717504271eeaa7a";
+/// Pinned TDLib revision (`master` at bump time; required for current Telegram login / ping).
+const TD_COMMIT: &str = "8ff05a0e7e064fa796593f3105c2dcf983e279d4";
 const TD_TARBALL_SHA256: &str =
-    "24a7f7e289e2ada4f214058504b1c5345dbe57213a7c546b0b9b4760a172642e";
+    "c884c64708314f49ea0eadded7a97edaab0db3e8dc4da7e8cb45ee1a9587a48b";
 
 /// Order matches TDLib’s dependency graph for the JSON static stack (verified against install tree).
 const TD_STATIC_LIBS: &[&str] = &[
     "tdjson_static",
     "tdjson_private",
     "tdclient",
-    "tdapi",
     "tdcore",
+    "tdmtproto",
     "tdnet",
-    "tdactor",
     "tddb",
     "tdsqlite",
+    "tdactor",
+    "tde2e",
     "tdutils",
+    "tdapi",
 ];
 
 fn main() {

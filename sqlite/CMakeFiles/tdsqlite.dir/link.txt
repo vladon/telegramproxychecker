@@ -1,0 +1,2 @@
+ccache /usr/bin/ar qc libtdsqlite.a CMakeFiles/tdsqlite.dir/sqlite/sqlite3.c.o
+ccache /usr/bin/ranlib libtdsqlite.a

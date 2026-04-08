@@ -233,7 +233,7 @@ struct JsonFail<'a> {
     server: &'a str,
     port: u16,
     error: &'a str,
-    message: &'static str,
+    message: &'a str,
     sponsored: &'a SponsoredReport,
     subscription: &'a SubscriptionReport,
 }
@@ -410,7 +410,7 @@ fn render_json(proxy: &ProxyConfig, report: &ProbeReport, w: &mut impl Write) ->
             server: proxy.server.as_str(),
             port: proxy.port,
             error: err,
-            message: "Telegram unreachable through proxy",
+            message: err,
             sponsored: &report.sponsored,
             subscription: &report.subscription,
         })

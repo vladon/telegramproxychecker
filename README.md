@@ -33,6 +33,8 @@ With default features, **`cargo build`** compiles TDLib from **`third_party/td`*
 ```bash
 export TG_API_ID="123456"
 export TG_API_HASH="your_api_hash"
+# Optional: TDLib `application_version` (defaults to a recent-style value if unset).
+# export TG_APPLICATION_VERSION="5.13.1"
 
 tg-proxy-check 'tg://proxy?server=1.2.3.4&port=443&secret=...'
 tg-proxy-check --proxy-link 'https://t.me/socks?server=1.2.3.4&port=1080'
@@ -78,7 +80,7 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 **JSON failure:**
 
 ```json
-{"ok":false,"proxy_type":"socks5","server":"1.2.3.4","port":1080,"error":"Proxy connection failed","message":"Telegram unreachable through proxy","sponsored":{"status":"unknown","channel_id":null},"subscription":{"checked":false,"joined":null}}
+{"ok":false,"proxy_type":"socks5","server":"1.2.3.4","port":1080,"error":"Proxy connection failed","message":"Proxy connection failed","sponsored":{"status":"unknown","channel_id":null},"subscription":{"checked":false,"joined":null}}
 ```
 
 ## Exit codes
@@ -96,14 +98,14 @@ FAIL type=socks5 server=1.2.3.4 port=1080 error="Timeout"
 
 TDLib is **vendored and built by Cargo**. You do **not** clone TDLib separately, run CMake by hand, or install `libtdjson.so` (or any TDLib library) into `/usr/lib` or similar.
 
-**API detail (pinned v1.8.0):** `pingProxy` only accepts a **`proxy_id`** returned by **`addProxy`**. The tool registers your MTProto/SOCKS5 proxy with `addProxy` (`enable: true`) and then calls `pingProxy` with that id—passing an inline `proxy` object to `pingProxy` is not valid in this scheme version.
+**API detail (current pin):** `addProxy` takes a nested **`proxy`** object (`server`, `port`, `type`); **`pingProxy`** uses the same **`proxy`** shape (not `proxy_id`).
 
 ### Source tree
 
 - **Normal / reproducible path:** check out TDLib under **`third_party/td`** at the pinned commit (see [`third_party/README.md`](third_party/README.md)). `build.rs` runs CMake against that directory.
 - **Bootstrap path:** if `third_party/td` has no `CMakeLists.txt`, `build.rs` downloads the **same** pinned commit as a tarball into `target/<triplet>/<profile>/build/tg-proxy-check-*/out/td-src/`, verifies SHA-256, then builds. That needs `curl` or `wget` once.
 
-Pinned revision: **[`v1.8.0`](https://github.com/tdlib/td/tree/v1.8.0)** (commit `b3ab664a18f8611f4dfcd3054717504271eeaa7a`), defined as `TD_COMMIT` in `build.rs`.
+Pinned revision: **upstream `master` snapshot** (commit `8ff05a0e7e064fa796593f3105c2dcf983e279d4`), defined as `TD_COMMIT` in `build.rs`. After bumping TDLib, run **`cargo clean`** once so CMake does not reuse an old `td-artifacts` tree.
 
 ### Where native artifacts go
 
@@ -288,6 +290,6 @@ cargo clippy --all-targets -- -D warnings
 
 ## Design note (FFI)
 
-- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → `OUT_DIR/td-artifacts/<variant>/tdlib-install`). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles **`addProxy`** then **`pingProxy(proxy_id)`** (TDLib 1.8.0) plus authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
-- **Pinned version:** Upstream tag **`v1.8.0`** (commit `b3ab664a18f8611f4dfcd3054717504271eeaa7a`); bump `TD_COMMIT` / `TD_TARBALL_SHA256` / submodule instructions together when upgrading.
+- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → `OUT_DIR/td-artifacts/<variant>/tdlib-install`). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles **`addProxy`** / **`pingProxy`** with nested **`proxy`** objects plus authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
+- **Pinned version:** See `TD_COMMIT` / `TD_TARBALL_SHA256` in `build.rs` and [`third_party/README.md`](third_party/README.md); bump them together when upgrading. Telegram may return **`UPDATE_APP_TO_LOGIN`** for very old layers—rebuild against a current pin if login or `pingProxy` fails with that code.
 - **Caveats:** All `td_receive` calls run on **one thread**; the pointer returned by `td_receive` is only valid until the next `td_receive` / `td_execute` on that thread—this implementation copies the string immediately. Temporary TDLib database directories are created under the system temp folder per run. Every exit path after `td_create_client_id` runs `close` and clears the log callback so the next probe in-process does not inherit state. Timeouts carry a `ProbeTimeoutContext` so verbose output still shows elapsed time and authorization states reached.

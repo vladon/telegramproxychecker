@@ -1,7 +1,7 @@
 //! TDLib multiplexed JSON client: `td_create_client_id` / `td_send` / `td_receive`.
 //!
-//! TDLib **v1.8.0** defines `pingProxy proxy_id:int32` only (no inline proxy). This module first
-//! sends **`addProxy`** (`enable: true`), then **`pingProxy`** with the returned **`id`**.
+//! Current pinned TDLib uses **`addProxy`** with a nested **`proxy`** object, then **`pingProxy`**
+//! with the same **`proxy`** shape (not `proxy_id`).
 //!
 //! Without `--auth-session`, the add/ping sequence starts once TDLib reports
 //! `authorizationStateWaitPhoneNumber`, or right after a successful `checkDatabaseEncryptionKey`
@@ -284,13 +284,12 @@ pub fn probe_proxy(
 
     let mut auth_states_seen: Vec<String> = Vec::new();
     let mut set_params_sent = false;
-    let mut check_key_sent = false;
     let mut add_proxy_extra: Option<String> = None;
     let mut ping_extra: Option<String> = None;
     let mut ping_result: Option<Result<f64, String>> = None;
     let mut authorization_state: Option<String> = None;
-    // `--auth-session`: addProxy after DB unlock (login uses proxy); ping only after Ready.
-    let mut registered_proxy_id: Option<i32> = None;
+    // `--auth-session`: addProxy after `setTdlibParameters` ok; ping only after Ready.
+    let mut interactive_proxy_registered = false;
     let interactive_auth = settings.auth_session.is_some();
 
     let extra_auth = next_extra("getAuthorizationState");
@@ -354,11 +353,10 @@ pub fn probe_proxy(
                         start_wall,
                         &auth_states_seen,
                         &mut set_params_sent,
-                        &mut check_key_sent,
                         &mut add_proxy_extra,
                         &mut ping_extra,
                         &mut ping_result,
-                        &mut registered_proxy_id,
+                        &mut interactive_proxy_registered,
                     ) {
                         td_shutdown_session(client_id);
                         return Err(e);
@@ -380,11 +378,10 @@ pub fn probe_proxy(
                     start_wall,
                     &auth_states_seen,
                     &mut set_params_sent,
-                    &mut check_key_sent,
                     &mut add_proxy_extra,
                     &mut ping_extra,
                     &mut ping_result,
-                    &mut registered_proxy_id,
+                    &mut interactive_proxy_registered,
                 ) {
                     td_shutdown_session(client_id);
                     return Err(e);
@@ -415,10 +412,6 @@ pub fn probe_proxy(
                     td_shutdown_session(client_id);
                     return Err(ProbeError::TdlibInit(msg));
                 }
-                if ex.starts_with("checkDatabaseEncryptionKey-") {
-                    td_shutdown_session(client_id);
-                    return Err(ProbeError::TdlibInit(msg));
-                }
                 if ex.starts_with("setAuthenticationPhoneNumber-")
                     || ex.starts_with("checkAuthenticationCode-")
                     || ex.starts_with("checkAuthenticationPassword-")
@@ -431,7 +424,7 @@ pub fn probe_proxy(
             }
             "ok" => {
                 let ex = extra_for_match(&v).unwrap_or_default();
-                if ex.starts_with("checkDatabaseEncryptionKey-") {
+                if ex.starts_with("setTdlibParameters-") && interactive_auth {
                     if let Err(e) = try_start_proxy_ping(
                         client_id,
                         proxy,
@@ -444,15 +437,15 @@ pub fn probe_proxy(
                     }
                 }
             }
-            "proxy" => {
+            "addedProxy" | "proxy" => {
                 let ex = extra_for_match(&v).unwrap_or_default();
                 if Some(ex.as_str()) == add_proxy_extra.as_deref() {
                     if let Err(e) = on_add_proxy_response(
                         client_id,
-                        &v,
+                        proxy,
                         interactive_auth,
                         &authorization_state,
-                        &mut registered_proxy_id,
+                        &mut interactive_proxy_registered,
                         &mut add_proxy_extra,
                         &mut ping_extra,
                         &mut ping_result,
@@ -829,11 +822,10 @@ fn handle_auth_state(
     probe_start_wall_ms: u128,
     auth_states_seen: &[String],
     set_params_sent: &mut bool,
-    check_key_sent: &mut bool,
     add_proxy_extra: &mut Option<String>,
     ping_extra: &mut Option<String>,
     ping_result: &mut Option<Result<f64, String>>,
-    registered_proxy_id: &mut Option<i32>,
+    interactive_proxy_registered: &mut bool,
 ) -> Result<(), ProbeError> {
     match state {
         "authorizationStateWaitTdlibParameters" if !*set_params_sent => {
@@ -843,19 +835,6 @@ fn handle_auth_state(
                 .map_err(|e| ProbeError::Internal(format!("serialize setTdlibParameters: {e}")))?;
             send_raw(client_id, &s)?;
             *set_params_sent = true;
-        }
-        "authorizationStateWaitEncryptionKey" if !*check_key_sent => {
-            let extra = next_extra("checkDatabaseEncryptionKey");
-            let req = json!({
-                "@type": "checkDatabaseEncryptionKey",
-                "encryption_key": "",
-                "@extra": extra,
-            });
-            let s = serde_json::to_string(&req).map_err(|e| {
-                ProbeError::Internal(format!("serialize checkDatabaseEncryptionKey: {e}"))
-            })?;
-            send_raw(client_id, &s)?;
-            *check_key_sent = true;
         }
         "authorizationStateWaitPhoneNumber" => {
             if interactive_auth {
@@ -965,8 +944,8 @@ fn handle_auth_state(
             send_raw(client_id, &s)?;
         }
         "authorizationStateReady" if interactive_auth => {
-            if let Some(id) = *registered_proxy_id {
-                send_ping_with_proxy_id(client_id, id, ping_extra, ping_result)?;
+            if *interactive_proxy_registered {
+                send_ping_with_proxy(client_id, proxy, ping_extra, ping_result)?;
             } else if add_proxy_extra.is_none() && ping_extra.is_none() {
                 try_start_proxy_ping(
                     client_id,
@@ -982,7 +961,7 @@ fn handle_auth_state(
     Ok(())
 }
 
-/// Register the proxy with TDLib (`addProxy`), then `pingProxy(proxy_id)` when the `proxy` object returns.
+/// Register the proxy with TDLib (`addProxy`), then `pingProxy` with the same `proxy` object when `addProxy` returns.
 fn try_start_proxy_ping(
     client_id: i32,
     proxy: &ProxyConfig,
@@ -1004,34 +983,29 @@ fn try_start_proxy_ping(
 
 fn on_add_proxy_response(
     client_id: i32,
-    v: &Value,
+    proxy: &ProxyConfig,
     interactive_auth: bool,
     authorization_state: &Option<String>,
-    registered_proxy_id: &mut Option<i32>,
+    interactive_proxy_registered: &mut bool,
     add_proxy_extra: &mut Option<String>,
     ping_extra: &mut Option<String>,
     ping_result: &mut Option<Result<f64, String>>,
 ) -> Result<(), ProbeError> {
-    let id = v
-        .get("id")
-        .and_then(|x| x.as_i64())
-        .and_then(|i| i32::try_from(i).ok())
-        .ok_or_else(|| ProbeError::Internal("addProxy response missing id".into()))?;
     *add_proxy_extra = None;
     if interactive_auth {
-        *registered_proxy_id = Some(id);
+        *interactive_proxy_registered = true;
         if authorization_state.as_deref() == Some("authorizationStateReady") {
-            send_ping_with_proxy_id(client_id, id, ping_extra, ping_result)?;
+            send_ping_with_proxy(client_id, proxy, ping_extra, ping_result)?;
         }
     } else {
-        send_ping_with_proxy_id(client_id, id, ping_extra, ping_result)?;
+        send_ping_with_proxy(client_id, proxy, ping_extra, ping_result)?;
     }
     Ok(())
 }
 
-fn send_ping_with_proxy_id(
+fn send_ping_with_proxy(
     client_id: i32,
-    proxy_id: i32,
+    proxy: &ProxyConfig,
     ping_extra: &mut Option<String>,
     ping_result: &mut Option<Result<f64, String>>,
 ) -> Result<(), ProbeError> {
@@ -1040,9 +1014,10 @@ fn send_ping_with_proxy_id(
     }
     let extra = next_extra("pingProxy");
     *ping_extra = Some(extra.clone());
+    let proxy_body = build_td_proxy_object(proxy)?;
     let req = json!({
         "@type": "pingProxy",
-        "proxy_id": proxy_id,
+        "proxy": proxy_body,
         "@extra": extra,
     });
     let s = serde_json::to_string(&req)
@@ -1102,41 +1077,45 @@ fn build_set_tdlib_parameters(
     files_directory: &str,
     creds: &TdlibCredentials,
 ) -> Value {
-    // TDLib 1.8+ (pinned v1.8.0): `setTdlibParameters` takes a single `parameters` object
-    // (`tdlibParameters` in td_api.tl), not flat fields on the request.
+    let application_version = std::env::var("TG_APPLICATION_VERSION")
+        .unwrap_or_else(|_| "5.13.1".to_string());
     json!({
         "@type": "setTdlibParameters",
         "@extra": extra,
-        "parameters": {
-            "@type": "tdlibParameters",
-            "use_test_dc": false,
-            "database_directory": database_directory,
-            "files_directory": files_directory,
-            "use_file_database": false,
-            "use_chat_info_database": false,
-            "use_message_database": false,
-            "use_secret_chats": false,
-            "api_id": creds.api_id,
-            "api_hash": creds.api_hash,
-            "system_language_code": "en",
-            "device_model": "tg-proxy-check",
-            "system_version": "",
-            "application_version": env!("CARGO_PKG_VERSION"),
-            "enable_storage_optimizer": false,
-            "ignore_file_names": false,
-        }
+        "use_test_dc": false,
+        "database_directory": database_directory,
+        "files_directory": files_directory,
+        "database_encryption_key": "",
+        "use_file_database": false,
+        "use_chat_info_database": false,
+        "use_message_database": false,
+        "use_secret_chats": false,
+        "api_id": creds.api_id,
+        "api_hash": creds.api_hash,
+        "system_language_code": "en",
+        "device_model": "Desktop",
+        "system_version": "",
+        "application_version": application_version,
     })
 }
 
-fn build_add_proxy(extra: &str, proxy: &ProxyConfig) -> Result<Value, ProbeError> {
+fn build_td_proxy_object(proxy: &ProxyConfig) -> Result<Value, ProbeError> {
     let proxy_type = proxy_type_json(proxy)?;
+    Ok(json!({
+        "@type": "proxy",
+        "server": proxy.server,
+        "port": i32::from(proxy.port),
+        "type": proxy_type,
+    }))
+}
+
+fn build_add_proxy(extra: &str, proxy: &ProxyConfig) -> Result<Value, ProbeError> {
+    let p = build_td_proxy_object(proxy)?;
     Ok(json!({
         "@type": "addProxy",
         "@extra": extra,
-        "server": proxy.server,
-        "port": i32::from(proxy.port),
+        "proxy": p,
         "enable": true,
-        "type": proxy_type,
     }))
 }
 

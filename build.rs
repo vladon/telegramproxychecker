@@ -117,6 +117,11 @@ fn main() {
     if let Ok(root) = env::var("OPENSSL_ROOT_DIR") {
         if !root.is_empty() {
             cfg.define("OPENSSL_ROOT_DIR", root.as_str());
+            // Musl + crt-static: TDLib codegen tools link with `-static`. FindOpenSSL otherwise picks
+            // libcrypto.so and the linker errors with "attempted static link of dynamic object".
+            if musl_static_tdlib {
+                cfg.define("OPENSSL_USE_STATIC_LIBS", "ON");
+            }
             // Musl static TDLib sets `-static` in CMAKE_*_FLAGS; FindZLIB try_compile can fail.
             // zlib lives next to OpenSSL in the cross image (/musl-local from scripts/cross-prebuild-musl.sh).
             // Do not `is_file()`/`is_dir()` gate these: the build script may run on the GitHub host
@@ -138,7 +143,9 @@ fn main() {
                 };
                 cfg.define(
                     "ZLIB_INCLUDE_DIR",
-                    zlib_inc.to_str().expect("ZLIB_INCLUDE_DIR path must be UTF-8"),
+                    zlib_inc
+                        .to_str()
+                        .expect("ZLIB_INCLUDE_DIR path must be UTF-8"),
                 );
                 cfg.define(
                     "ZLIB_LIBRARY",
@@ -168,12 +175,15 @@ fn main() {
         target_os == "windows" || force_shared || (is_musl_target && !musl_static_tdlib);
 
     if use_shared {
-        link_local_shared(&lib_dir, &target_os);
+        link_local_shared(&lib_dir, &target_os, is_musl_target);
     } else if target_os == "macos" {
         link_unix_static_apple(&lib_dir);
         link_system_crypto_z(&lib_dir, &target_os, false);
         println!("cargo:rustc-link-lib=c++");
     } else if musl_static_tdlib {
+        for dir in musl_dependency_lib_dirs() {
+            println!("cargo:rustc-link-search=native={}", dir.display());
+        }
         link_unix_static_gnu(&lib_dir);
         link_system_crypto_z(&lib_dir, &target_os, ssl_static_enabled());
         println!("cargo:rustc-link-lib=static=stdc++");
@@ -382,7 +392,7 @@ fn tdlib_built_with_zstd(lib_dir: &Path) -> bool {
     String::from_utf8_lossy(&out.stdout).contains("ZSTD_")
 }
 
-fn link_local_shared(lib_dir: &Path, target_os: &str) {
+fn link_local_shared(lib_dir: &Path, target_os: &str, is_musl_target: bool) {
     println!("cargo:rustc-link-lib=dylib=tdjson");
 
     let abs = fs::canonicalize(lib_dir).unwrap_or_else(|_| lib_dir.to_path_buf());
@@ -398,10 +408,21 @@ fn link_local_shared(lib_dir: &Path, target_os: &str) {
         _ => {}
     }
 
+    // Linux musl (cross): OpenSSL/zlib/zstd live under OPENSSL_ROOT_DIR / ZLIB_ROOT (e.g. /musl-local),
+    // not next to libtdjson.so. Without these search paths the linker fails with "cannot find -lssl".
+    if is_musl_target && target_os == "linux" {
+        for dir in musl_dependency_lib_dirs() {
+            println!("cargo:rustc-link-search=native={}", dir.display());
+        }
+    }
+
     // Shared tdjson still needs OpenSSL/zlib at runtime through the .so/.dylib.
     println!("cargo:rustc-link-lib=dylib=ssl");
     println!("cargo:rustc-link-lib=dylib=crypto");
     println!("cargo:rustc-link-lib=dylib=z");
+    if tdlib_built_with_zstd(lib_dir) {
+        println!("cargo:rustc-link-lib=dylib=zstd");
+    }
 
     match target_os {
         "macos" => println!("cargo:rustc-link-lib=c++"),
@@ -410,6 +431,35 @@ fn link_local_shared(lib_dir: &Path, target_os: &str) {
         }
         _ => {}
     }
+}
+
+/// `lib` / `lib64` under OPENSSL_ROOT_DIR / ZLIB_ROOT (or `/musl-local`) for musl cross links.
+fn musl_dependency_lib_dirs() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for key in ["OPENSSL_ROOT_DIR", "ZLIB_ROOT"] {
+        if let Ok(s) = env::var(key) {
+            if s.is_empty() {
+                continue;
+            }
+            let pb = PathBuf::from(&s);
+            if !roots.iter().any(|r| r == &pb) {
+                roots.push(pb);
+            }
+        }
+    }
+    if roots.is_empty() {
+        roots.push(PathBuf::from("/musl-local"));
+    }
+    let mut out = Vec::new();
+    for root in roots {
+        for sub in ["lib", "lib64"] {
+            let d = root.join(sub);
+            if d.is_dir() {
+                out.push(d);
+            }
+        }
+    }
+    out
 }
 
 fn copy_tdjson_dll_next_to_exe(lib_dir: &Path) {

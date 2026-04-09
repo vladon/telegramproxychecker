@@ -45,14 +45,14 @@ jobs:
           fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
-  # Single matrix + fail-fast: first failure (GNU or musl) cancels every other leg.
+  # Single matrix; fail-fast off so other legs still finish and upload artifacts.
   build:
     name: Build (${{ matrix.suffix }})
     needs: validate-tag
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - libc: gnu
@@ -199,25 +199,41 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    if: github.ref_type == 'tag'
+    # Run after builds finish even when the matrix job failed (partial successes still upload).
+    if: >
+      always() &&
+      github.ref_type == 'tag' &&
+      needs.validate-tag.result == 'success' &&
+      needs.build.result != 'skipped'
     needs: [validate-tag, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
+      # If every leg failed before upload, the download step errors; do not fail the job.
       - uses: actions/download-artifact@v5
+        continue-on-error: true
+        id: download
         with:
           pattern: artifact-*
           path: dist
           merge-multiple: true
 
       - name: List release files
-        run: ls -la dist/
+        run: |
+          mkdir -p dist
+          ls -la dist/ || true
 
       - uses: softprops/action-gh-release@v2
+        if: hashFiles('dist/*.tar.gz') != ''
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: No release assets (all builds failed)
+        if: hashFiles('dist/*.tar.gz') == ''
+        run: |
+          echo "::warning::No artifacts were uploaded; skipping GitHub Release file upload. Fix failing build legs and re-run or add a new tag."

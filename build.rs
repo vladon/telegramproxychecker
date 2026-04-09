@@ -105,16 +105,19 @@ fn main() {
     if msvc {
         cfg.static_crt(false);
     } else if is_musl_target {
-        // Unix Makefiles + Cargo’s jobserver can compile tdutils sources before TDLib codegen
-        // creates `tdutils/generate/auto/*.cpp` (missing rule for mime_type_to_extension.cpp).
-        // Ninja gets dependency edges from CMake correctly (see TDLib + parallel make issues).
+        // cross-rs sets CMAKE_SYSTEM_NAME for musl, so CMake marks CMAKE_CROSSCOMPILING=ON.
+        // TDLib then omits `add_dependencies(tdmtproto tl_generate_mtproto)` (and similar), so
+        // generated headers (mtproto_api.h) and sources are never built before consumers.
+        // Codegen tools run in the same container as the musl compiler; treat as native for TDLib.
+        cfg.define("CMAKE_CROSSCOMPILING", "OFF");
+        // Ninja handles TDLib’s codegen graph better than Make + Cargo’s jobserver.
         cfg.generator("Ninja");
     }
 
     if let Ok(root) = env::var("OPENSSL_ROOT_DIR") {
         if !root.is_empty() {
             cfg.define("OPENSSL_ROOT_DIR", root.as_str());
-            // Musl static TDLib sets `-static` in CMAKE_*_FLAGS; FindZLIB's try_compile then fails.
+            // Musl static TDLib sets `-static` in CMAKE_*_FLAGS; FindZLIB try_compile can fail.
             // zlib lives next to OpenSSL in the cross image (/musl-local from scripts/cross-prebuild-musl.sh).
             // Do not `is_file()`/`is_dir()` gate these: the build script may run on the GitHub host
             // where /musl-local is absent, while CMake runs in the cross container where it exists.
@@ -147,22 +150,7 @@ fn main() {
         }
     }
 
-    // TDLib generates headers/sources (e.g. mtproto_api.h, tdutils/generate/auto/*.cpp) via custom
-    // commands. `cmake --build --parallel N` / Make jobservers can compile consumers before codegen
-    // finishes. The cmake crate reads `NUM_JOBS` from this process and forwards `CARGO_MAKEFLAGS`
-    // into Make; force single-threaded TDLib builds for deterministic ordering.
-    let saved_num_jobs = env::var("NUM_JOBS").ok();
-    let saved_cargo_makeflags = env::var_os("CARGO_MAKEFLAGS");
-    env::set_var("NUM_JOBS", "1");
-    env::remove_var("CARGO_MAKEFLAGS");
     let _cmake_out = cfg.build();
-    match saved_num_jobs {
-        Some(ref v) => env::set_var("NUM_JOBS", v),
-        None => env::remove_var("NUM_JOBS"),
-    }
-    if let Some(v) = saved_cargo_makeflags {
-        env::set_var("CARGO_MAKEFLAGS", v);
-    }
 
     let lib_dir = install_dir.join("lib");
     if !lib_dir.is_dir() {

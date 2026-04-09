@@ -147,7 +147,22 @@ fn main() {
         }
     }
 
+    // TDLib generates headers/sources (e.g. mtproto_api.h, tdutils/generate/auto/*.cpp) via custom
+    // commands. `cmake --build --parallel N` / Make jobservers can compile consumers before codegen
+    // finishes. The cmake crate reads `NUM_JOBS` from this process and forwards `CARGO_MAKEFLAGS`
+    // into Make; force single-threaded TDLib builds for deterministic ordering.
+    let saved_num_jobs = env::var("NUM_JOBS").ok();
+    let saved_cargo_makeflags = env::var_os("CARGO_MAKEFLAGS");
+    env::set_var("NUM_JOBS", "1");
+    env::remove_var("CARGO_MAKEFLAGS");
     let _cmake_out = cfg.build();
+    match saved_num_jobs {
+        Some(ref v) => env::set_var("NUM_JOBS", v),
+        None => env::remove_var("NUM_JOBS"),
+    }
+    if let Some(v) = saved_cargo_makeflags {
+        env::set_var("CARGO_MAKEFLAGS", v);
+    }
 
     let lib_dir = install_dir.join("lib");
     if !lib_dir.is_dir() {

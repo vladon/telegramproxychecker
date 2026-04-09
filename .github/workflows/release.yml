@@ -200,11 +200,12 @@ jobs:
   publish:
     name: Publish GitHub Release
     # Run after builds finish even when the matrix job failed (partial successes still upload).
+    # Tag push: release named after the tag. workflow_dispatch: draft release + unique ci-* tag (ref is a branch).
     if: >
       always() &&
-      github.ref_type == 'tag' &&
       needs.validate-tag.result == 'success' &&
-      needs.build.result != 'skipped'
+      needs.build.result != 'skipped' &&
+      (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
     needs: [validate-tag, build]
     runs-on: ubuntu-22.04
     permissions:
@@ -225,10 +226,21 @@ jobs:
           ls -la dist/ || true
 
       - uses: softprops/action-gh-release@v2
-        if: hashFiles('dist/*.tar.gz') != ''
+        if: hashFiles('dist/*.tar.gz') != '' && github.ref_type == 'tag'
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: softprops/action-gh-release@v2
+        if: hashFiles('dist/*.tar.gz') != '' && github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ci-${{ inputs.version_label }}-${{ github.run_id }}
+          name: CI ${{ inputs.version_label }} (run ${{ github.run_id }})
+          draft: true
+          target_commitish: ${{ github.sha }}
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

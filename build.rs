@@ -183,6 +183,13 @@ fn main() {
         link_system_crypto_z(&lib_dir, &target_os, false, false);
         println!("cargo:rustc-link-lib=c++");
     } else if musl_static_tdlib {
+        // Prefer rustc self-contained `-L` first so any stray `-l*` from dependency archives
+        // resolves to PIE musl libs, not the GCC cross sysroot next to libstdc++.
+        if let Some(libc_a) = rust_target_self_contained_archive("libc.a") {
+            if let Some(dir) = libc_a.parent() {
+                println!("cargo:rustc-link-search=native={}", dir.display());
+            }
+        }
         for dir in musl_dependency_lib_dirs() {
             println!("cargo:rustc-link-search=native={}", dir.display());
         }
@@ -375,13 +382,26 @@ fn link_unix_static_gnu_with_stdcxx(lib_dir: &Path, static_openssl_z: bool) {
     // TD `.a` files reference OpenSSL/zlib; if those `-l` lines come only after `--end-group`,
     // ld does not rescan them with the TD archives and `EVP_*` / `deflate` stay undefined.
     if static_openssl_z {
-        println!("cargo:rustc-link-arg=-lcrypto");
-        println!("cargo:rustc-link-arg=-lssl");
-        println!("cargo:rustc-link-arg=-lz");
+        // Use archive paths: bare `-lcrypto` / `-lpthread` search GCC's musl sysroot first
+        // (next to `-lstdc++`) and pull non-PIE `libc.a`, breaking `-static-pie`.
+        let crypto = musl_find_static_archive("crypto").unwrap_or_else(|| {
+            panic!("musl static: missing libcrypto.a under OPENSSL_ROOT_DIR or /musl-local.")
+        });
+        let ssl = musl_find_static_archive("ssl")
+            .expect("musl static: missing libssl.a under OPENSSL_ROOT_DIR or /musl-local.");
+        let z = musl_find_static_archive("z")
+            .expect("musl static: missing libz.a under ZLIB_ROOT or /musl-local.");
+        println!("cargo:rustc-link-arg={}", crypto.display());
+        println!("cargo:rustc-link-arg={}", ssl.display());
+        println!("cargo:rustc-link-arg={}", z.display());
         if tdlib_built_with_zstd(lib_dir) {
-            println!("cargo:rustc-link-arg=-lzstd");
+            if let Some(p) = musl_find_static_archive("zstd") {
+                println!("cargo:rustc-link-arg={}", p.display());
+            }
         }
-        println!("cargo:rustc-link-arg=-lpthread");
+        if let Some(p) = rust_target_self_contained_archive("libpthread.a") {
+            println!("cargo:rustc-link-arg={}", p.display());
+        }
     }
     // Use a concrete archive path here: `rustc-link-lib=static=stdc++` can be reordered after
     // this `--start-group`, breaking resolution of `operator delete` from libtdapi.a.
@@ -520,8 +540,7 @@ fn link_local_shared(lib_dir: &Path, target_os: &str, is_musl_target: bool) {
     }
 }
 
-/// `lib` / `lib64` under OPENSSL_ROOT_DIR / ZLIB_ROOT (or `/musl-local`) for musl cross links.
-fn musl_dependency_lib_dirs() -> Vec<PathBuf> {
+fn musl_prefix_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     for key in ["OPENSSL_ROOT_DIR", "ZLIB_ROOT"] {
         if let Ok(s) = env::var(key) {
@@ -537,6 +556,25 @@ fn musl_dependency_lib_dirs() -> Vec<PathBuf> {
     if roots.is_empty() {
         roots.push(PathBuf::from("/musl-local"));
     }
+    roots
+}
+
+fn musl_find_static_archive(stem: &str) -> Option<PathBuf> {
+    let name = format!("lib{stem}.a");
+    for root in musl_prefix_roots() {
+        for sub in ["lib", "lib64"] {
+            let p = root.join(sub).join(&name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// `lib` / `lib64` under OPENSSL_ROOT_DIR / ZLIB_ROOT (or `/musl-local`) for musl cross links.
+fn musl_dependency_lib_dirs() -> Vec<PathBuf> {
+    let roots = musl_prefix_roots();
     let mut out = Vec::new();
     for root in roots {
         for sub in ["lib", "lib64"] {

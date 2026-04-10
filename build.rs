@@ -179,7 +179,7 @@ fn main() {
         link_local_shared(&lib_dir, &target_os, is_musl_target);
     } else if target_os == "macos" {
         link_unix_static_apple(&lib_dir);
-        link_system_crypto_z(&lib_dir, &target_os, false);
+        link_system_crypto_z(&lib_dir, &target_os, false, false);
         println!("cargo:rustc-link-lib=c++");
     } else if musl_static_tdlib {
         for dir in musl_dependency_lib_dirs() {
@@ -192,11 +192,11 @@ fn main() {
         // `operator delete` yet and the link fails. Keep TD archives and libstdc++ in one
         // `--start-group` so ld rescans until C++ symbols resolve.
         link_unix_static_gnu_with_stdcxx(&lib_dir);
-        link_system_crypto_z(&lib_dir, &target_os, ssl_static_enabled());
+        link_system_crypto_z(&lib_dir, &target_os, ssl_static_enabled(), true);
     } else {
         // Linux GNU and other non-macOS Unix (BSD, etc.): GNU ld / lld style groups.
         link_unix_static_gnu(&lib_dir);
-        link_system_crypto_z(&lib_dir, &target_os, false);
+        link_system_crypto_z(&lib_dir, &target_os, false, false);
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
 }
@@ -350,6 +350,13 @@ fn link_unix_static_gnu_with_stdcxx(lib_dir: &Path) {
     // Use a concrete archive path here: `rustc-link-lib=static=stdc++` can be reordered after
     // this `--start-group`, breaking resolution of `operator delete` from libtdapi.a.
     println!("cargo:rustc-link-arg={}", stdcxx_a.display());
+    // libstdc++.a references libc (setlocale, sprintf, __cxa_atexit, …); with +crt-static rustc
+    // may not place -lc after libstdc++.a, so pull musl libc and libm in the same group.
+    println!("cargo:rustc-link-arg=-lc");
+    println!("cargo:rustc-link-arg=-lm");
+    // GCC runtime (unwind, integer helpers) used by libstdc++.a / static C++ on musl.
+    println!("cargo:rustc-link-arg=-lgcc_eh");
+    println!("cargo:rustc-link-arg=-lgcc");
     println!("cargo:rustc-link-arg=-Wl,--end-group");
 }
 
@@ -380,7 +387,12 @@ fn link_unix_static_apple(lib_dir: &Path) {
     }
 }
 
-fn link_system_crypto_z(lib_dir: &Path, target_os: &str, static_ssl: bool) {
+fn link_system_crypto_z(
+    lib_dir: &Path,
+    target_os: &str,
+    static_ssl: bool,
+    musl_static_tdlib: bool,
+) {
     if static_ssl {
         println!("cargo:rustc-link-lib=static=ssl");
         println!("cargo:rustc-link-lib=static=crypto");
@@ -399,8 +411,13 @@ fn link_system_crypto_z(lib_dir: &Path, target_os: &str, static_ssl: bool) {
     }
     match target_os {
         "linux" => {
-            println!("cargo:rustc-link-lib=dylib=dl");
-            println!("cargo:rustc-link-lib=dylib=pthread");
+            if musl_static_tdlib {
+                // +crt-static fully static: avoid shared libdl/libpthread (musl folds most into libc).
+                println!("cargo:rustc-link-lib=static=pthread");
+            } else {
+                println!("cargo:rustc-link-lib=dylib=dl");
+                println!("cargo:rustc-link-lib=dylib=pthread");
+            }
         }
         "macos" | "windows" => {}
         // Other Unix (BSD, etc.): pthread is commonly required for the static C++ stack.

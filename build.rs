@@ -191,8 +191,11 @@ fn main() {
         // Rust may order `static=stdc++` before the TD `.a` list; then `libtdapi.a` sees no
         // `operator delete` yet and the link fails. Keep TD archives and libstdc++ in one
         // `--start-group` so ld rescans until C++ symbols resolve.
-        link_unix_static_gnu_with_stdcxx(&lib_dir);
-        link_system_crypto_z(&lib_dir, &target_os, ssl_static_enabled(), true);
+        let static_ssl = ssl_static_enabled();
+        link_unix_static_gnu_with_stdcxx(&lib_dir, static_ssl);
+        if !static_ssl {
+            link_system_crypto_z(&lib_dir, &target_os, false, true);
+        }
     } else {
         // Linux GNU and other non-macOS Unix (BSD, etc.): GNU ld / lld style groups.
         link_unix_static_gnu(&lib_dir);
@@ -339,7 +342,7 @@ fn link_unix_static_gnu(lib_dir: &Path) {
     println!("cargo:rustc-link-arg=-Wl,--end-group");
 }
 
-fn link_unix_static_gnu_with_stdcxx(lib_dir: &Path) {
+fn link_unix_static_gnu_with_stdcxx(lib_dir: &Path, static_openssl_z: bool) {
     let stdcxx_a = musl_libstdcxx_static_path().unwrap_or_else(|| {
         panic!(
             "musl static TDLib: could not locate libstdc++.a; set CXX to the target musl g++ (e.g. x86_64-linux-musl-g++)."
@@ -347,6 +350,17 @@ fn link_unix_static_gnu_with_stdcxx(lib_dir: &Path) {
     });
     println!("cargo:rustc-link-arg=-Wl,--start-group");
     link_unix_static_gnu_archives(lib_dir);
+    // TD `.a` files reference OpenSSL/zlib; if those `-l` lines come only after `--end-group`,
+    // ld does not rescan them with the TD archives and `EVP_*` / `deflate` stay undefined.
+    if static_openssl_z {
+        println!("cargo:rustc-link-arg=-lcrypto");
+        println!("cargo:rustc-link-arg=-lssl");
+        println!("cargo:rustc-link-arg=-lz");
+        if tdlib_built_with_zstd(lib_dir) {
+            println!("cargo:rustc-link-arg=-lzstd");
+        }
+        println!("cargo:rustc-link-arg=-lpthread");
+    }
     // Use a concrete archive path here: `rustc-link-lib=static=stdc++` can be reordered after
     // this `--start-group`, breaking resolution of `operator delete` from libtdapi.a.
     println!("cargo:rustc-link-arg={}", stdcxx_a.display());

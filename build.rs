@@ -188,9 +188,11 @@ fn main() {
         if let Some(dir) = musl_libstdcxx_static_dir() {
             println!("cargo:rustc-link-search=native={}", dir.display());
         }
-        link_unix_static_gnu(&lib_dir);
+        // Rust may order `static=stdc++` before the TD `.a` list; then `libtdapi.a` sees no
+        // `operator delete` yet and the link fails. Keep TD archives and libstdc++ in one
+        // `--start-group` so ld rescans until C++ symbols resolve.
+        link_unix_static_gnu_with_stdcxx(&lib_dir);
         link_system_crypto_z(&lib_dir, &target_os, ssl_static_enabled());
-        println!("cargo:rustc-link-lib=static=stdc++");
     } else {
         // Linux GNU and other non-macOS Unix (BSD, etc.): GNU ld / lld style groups.
         link_unix_static_gnu(&lib_dir);
@@ -333,6 +335,25 @@ Update TD_COMMIT / TD_TARBALL_SHA256 in build.rs if bumping TDLib.",
 
 fn link_unix_static_gnu(lib_dir: &Path) {
     println!("cargo:rustc-link-arg=-Wl,--start-group");
+    link_unix_static_gnu_archives(lib_dir);
+    println!("cargo:rustc-link-arg=-Wl,--end-group");
+}
+
+fn link_unix_static_gnu_with_stdcxx(lib_dir: &Path) {
+    let stdcxx_a = musl_libstdcxx_static_path().unwrap_or_else(|| {
+        panic!(
+            "musl static TDLib: could not locate libstdc++.a; set CXX to the target musl g++ (e.g. x86_64-linux-musl-g++)."
+        )
+    });
+    println!("cargo:rustc-link-arg=-Wl,--start-group");
+    link_unix_static_gnu_archives(lib_dir);
+    // Use a concrete archive path here: `rustc-link-lib=static=stdc++` can be reordered after
+    // this `--start-group`, breaking resolution of `operator delete` from libtdapi.a.
+    println!("cargo:rustc-link-arg={}", stdcxx_a.display());
+    println!("cargo:rustc-link-arg=-Wl,--end-group");
+}
+
+fn link_unix_static_gnu_archives(lib_dir: &Path) {
     for name in TD_STATIC_LIBS {
         let p = lib_dir.join(format!("lib{name}.a"));
         if !p.is_file() {
@@ -343,7 +364,6 @@ fn link_unix_static_gnu(lib_dir: &Path) {
         }
         println!("cargo:rustc-link-arg={}", p.display());
     }
-    println!("cargo:rustc-link-arg=-Wl,--end-group");
 }
 
 /// macOS `ld` does not support `--start-group`; `-force_load` each archive preserves symbol resolution.
@@ -466,8 +486,8 @@ fn musl_dependency_lib_dirs() -> Vec<PathBuf> {
     out
 }
 
-/// Directory containing `libstdc++.a` for the musl C++ toolchain (not on the default linker path for `-static`).
-fn musl_libstdcxx_static_dir() -> Option<PathBuf> {
+/// Absolute path to `libstdc++.a` for the musl C++ toolchain (for `-static` / `+crt-static` links).
+fn musl_libstdcxx_static_path() -> Option<PathBuf> {
     let cxx = env::var("CXX")
         .ok()
         .filter(|s| !s.is_empty())
@@ -481,10 +501,11 @@ fn musl_libstdcxx_static_dir() -> Option<PathBuf> {
         return None;
     }
     let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    if !p.is_file() {
-        return None;
-    }
-    p.parent().map(PathBuf::from)
+    p.is_file().then_some(p)
+}
+
+fn musl_libstdcxx_static_dir() -> Option<PathBuf> {
+    musl_libstdcxx_static_path().and_then(|p| p.parent().map(PathBuf::from))
 }
 
 fn default_musl_cxx_for_target() -> Option<String> {

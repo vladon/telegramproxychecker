@@ -57,6 +57,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CMAKE");
     println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
+    println!("cargo:rerun-if-env-changed=CXX");
 
     if env::var("CARGO_FEATURE_TDLIB").is_err() {
         return;
@@ -182,6 +183,9 @@ fn main() {
         println!("cargo:rustc-link-lib=c++");
     } else if musl_static_tdlib {
         for dir in musl_dependency_lib_dirs() {
+            println!("cargo:rustc-link-search=native={}", dir.display());
+        }
+        if let Some(dir) = musl_libstdcxx_static_dir() {
             println!("cargo:rustc-link-search=native={}", dir.display());
         }
         link_unix_static_gnu(&lib_dir);
@@ -460,6 +464,36 @@ fn musl_dependency_lib_dirs() -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Directory containing `libstdc++.a` for the musl C++ toolchain (not on the default linker path for `-static`).
+fn musl_libstdcxx_static_dir() -> Option<PathBuf> {
+    let cxx = env::var("CXX")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| default_musl_cxx_for_target())?;
+
+    let out = Command::new(&cxx)
+        .args(["-print-file-name=libstdc++.a"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    if !p.is_file() {
+        return None;
+    }
+    p.parent().map(PathBuf::from)
+}
+
+fn default_musl_cxx_for_target() -> Option<String> {
+    let target = env::var("TARGET").ok()?;
+    if !target.contains("musl") {
+        return None;
+    }
+    let arch = target.split('-').next()?;
+    Some(format!("{arch}-linux-musl-g++"))
 }
 
 fn copy_tdjson_dll_next_to_exe(lib_dir: &Path) {

@@ -190,7 +190,7 @@ jobs:
             scripts/package-release-artifact.sh dist "$NAME" "$BIN" "$TDJSON"
           fi
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: artifact-${{ matrix.suffix }}
           path: |
@@ -212,7 +212,7 @@ jobs:
       contents: write
     steps:
       # If every leg failed before upload, the download step errors; do not fail the job.
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         continue-on-error: true
         id: download
         with:
@@ -225,25 +225,23 @@ jobs:
           mkdir -p dist
           ls -la dist/ || true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: ncipollo/release-action@v1.21.0
         if: hashFiles('dist/*.tar.gz') != '' && github.ref_type == 'tag'
         with:
-          tag_name: ${{ github.ref_name }}
+          tag: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          files: dist/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: dist/*
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: softprops/action-gh-release@v2
+      - uses: ncipollo/release-action@v1.21.0
         if: hashFiles('dist/*.tar.gz') != '' && github.event_name == 'workflow_dispatch'
         with:
-          tag_name: ci-${{ inputs.version_label }}-${{ github.run_id }}
+          tag: ci-${{ inputs.version_label }}-${{ github.run_id }}
           name: CI ${{ inputs.version_label }} (run ${{ github.run_id }})
           draft: true
-          target_commitish: ${{ github.sha }}
-          files: dist/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          commit: ${{ github.sha }}
+          artifacts: dist/*
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: No release assets (all builds failed)
         if: hashFiles('dist/*.tar.gz') == ''

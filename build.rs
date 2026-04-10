@@ -58,6 +58,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CMAKE");
     println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
     println!("cargo:rerun-if-env-changed=CXX");
+    println!("cargo:rerun-if-env-changed=RUSTC");
 
     if env::var("CARGO_FEATURE_TDLIB").is_err() {
         return;
@@ -342,6 +343,27 @@ fn link_unix_static_gnu(lib_dir: &Path) {
     println!("cargo:rustc-link-arg=-Wl,--end-group");
 }
 
+/// Archives under rustc's `lib/rustlib/<target>/lib/self-contained/` (PIE musl libc for `-static-pie`).
+fn rust_target_self_contained_archive(name: &str) -> Option<PathBuf> {
+    let target = env::var("TARGET").ok()?;
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let out = Command::new(rustc)
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    let p = sysroot
+        .join("lib/rustlib")
+        .join(&target)
+        .join("lib/self-contained")
+        .join(name);
+    p.is_file().then_some(p)
+}
+
 fn link_unix_static_gnu_with_stdcxx(lib_dir: &Path, static_openssl_z: bool) {
     let stdcxx_a = musl_libstdcxx_static_path().unwrap_or_else(|| {
         panic!(
@@ -364,10 +386,20 @@ fn link_unix_static_gnu_with_stdcxx(lib_dir: &Path, static_openssl_z: bool) {
     // Use a concrete archive path here: `rustc-link-lib=static=stdc++` can be reordered after
     // this `--start-group`, breaking resolution of `operator delete` from libtdapi.a.
     println!("cargo:rustc-link-arg={}", stdcxx_a.display());
-    // libstdc++.a references libc (setlocale, sprintf, __cxa_atexit, …); with +crt-static rustc
-    // may not place -lc after libstdc++.a, so pull musl libc and libm in the same group.
-    println!("cargo:rustc-link-arg=-lc");
-    println!("cargo:rustc-link-arg=-lm");
+    // libstdc++.a needs C symbols after it in this `--start-group`. Bare `-lc` / `-lm` resolve to
+    // the GCC musl sysroot libc.a, which is not built for PIE and breaks `-static-pie`
+    // (R_X86_64_32 / "can not be used when making a PIE object"). Use rustc's self-contained
+    // archives — the same libc.a the musl target links for static-pie.
+    let libc_a = rust_target_self_contained_archive("libc.a").unwrap_or_else(|| {
+        let t = env::var("TARGET").unwrap_or_else(|_| "TARGET".into());
+        panic!(
+            "musl static +crt-static: missing self-contained libc.a (expected under $(rustc --print sysroot)/lib/rustlib/{t}/lib/self-contained/libc.a)."
+        )
+    });
+    println!("cargo:rustc-link-arg={}", libc_a.display());
+    if let Some(libm_a) = rust_target_self_contained_archive("libm.a") {
+        println!("cargo:rustc-link-arg={}", libm_a.display());
+    }
     // GCC runtime (unwind, integer helpers) used by libstdc++.a / static C++ on musl.
     println!("cargo:rustc-link-arg=-lgcc_eh");
     println!("cargo:rustc-link-arg=-lgcc");

@@ -5,8 +5,8 @@
 //!
 //! Without `--auth-session`, the add/ping sequence starts once TDLib reports
 //! `authorizationStateWaitPhoneNumber`, or right after a successful `checkDatabaseEncryptionKey`
-//! `ok`. With `--auth-session`, `addProxy` runs after the DB encryption check so login traffic can
-//! use the proxy; `pingProxy` runs only after `authorizationStateReady`.
+//! `ok`. With `--auth-session`, `addProxy` runs only after `authorizationStateReady` so interactive
+//! login (phone, code, 2FA) uses a direct Telegram connection; `pingProxy` still uses the CLI proxy.
 
 use super::tdjson_sys;
 use super::{TdlibCredentials, TdlibProbeSettings};
@@ -283,7 +283,7 @@ pub fn probe_proxy(
     let mut ping_extra: Option<String> = None;
     let mut ping_result: Option<Result<f64, String>> = None;
     let mut authorization_state: Option<String> = None;
-    // `--auth-session`: addProxy after `setTdlibParameters` ok; ping only after Ready.
+    // `--auth-session`: addProxy only after `authorizationStateReady` (see `handle_auth_state`).
     let mut interactive_proxy_registered = false;
     let interactive_auth = settings.auth_session.is_some();
 
@@ -415,21 +415,7 @@ pub fn probe_proxy(
                     return Err(ProbeError::TdlibInit(msg));
                 }
             }
-            "ok" => {
-                let ex = extra_for_match(&v).unwrap_or_default();
-                if ex.starts_with("setTdlibParameters-") && interactive_auth {
-                    if let Err(e) = try_start_proxy_ping(
-                        client_id,
-                        proxy,
-                        &mut add_proxy_extra,
-                        &mut ping_extra,
-                        &mut ping_result,
-                    ) {
-                        td_shutdown_session(client_id);
-                        return Err(e);
-                    }
-                }
-            }
+            "ok" => {}
             "addedProxy" | "proxy" => {
                 let ex = extra_for_match(&v).unwrap_or_default();
                 if Some(ex.as_str()) == add_proxy_extra.as_deref() {

@@ -592,7 +592,7 @@ fn musl_libstdcxx_static_path() -> Option<PathBuf> {
     let cxx = env::var("CXX")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| default_musl_cxx_for_target())?;
+        .or_else(default_musl_cxx_for_target)?;
 
     let out = Command::new(&cxx)
         .args(["-print-file-name=libstdc++.a"])

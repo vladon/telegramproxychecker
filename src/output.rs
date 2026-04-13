@@ -35,6 +35,9 @@ impl SponsoredStatus {
 pub struct SponsoredReport {
     pub status: SponsoredStatus,
     pub channel_id: Option<i64>,
+    /// Display title from TDLib `chat.title` when sponsor is detected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -48,6 +51,7 @@ impl SponsoredReport {
         Self {
             status: SponsoredStatus::Unknown,
             channel_id: None,
+            channel_title: None,
         }
     }
 
@@ -55,13 +59,19 @@ impl SponsoredReport {
         Self {
             status: SponsoredStatus::No,
             channel_id: None,
+            channel_title: None,
         }
     }
 
     pub fn yes_with_peer_id(peer_id: i64) -> Self {
+        Self::yes_with_peer(peer_id, None)
+    }
+
+    pub fn yes_with_peer(peer_id: i64, channel_title: Option<String>) -> Self {
         Self {
             status: SponsoredStatus::Yes,
             channel_id: Some(peer_id),
+            channel_title,
         }
     }
 }
@@ -363,12 +373,18 @@ fn render_verbose_text(
     writeln!(w, "interpretation={}", report.interpretation.as_str())?;
     writeln!(
         w,
-        "sponsored_status={} sponsored_channel_id={}",
+        "sponsored_status={} sponsored_channel_id={} sponsored_channel_title={}",
         report.sponsored.status.as_str(),
         report
             .sponsored
             .channel_id
             .map(|n| n.to_string())
+            .unwrap_or_else(|| "null".into()),
+        report
+            .sponsored
+            .channel_title
+            .as_deref()
+            .map(escape_quotes)
             .unwrap_or_else(|| "null".into())
     )?;
     writeln!(
@@ -532,7 +548,7 @@ mod tests {
             probe_end_wall_ms: 0,
             wall_duration: Duration::ZERO,
             tdlib_reported_seconds: Some(0.32),
-            sponsored: SponsoredReport::yes_with_peer_id(123456789_i64),
+            sponsored: SponsoredReport::yes_with_peer(123456789_i64, Some("Promo News".into())),
             subscription: SubscriptionReport::checked_joined(true),
         };
         let mut buf = Vec::new();
@@ -541,6 +557,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
         assert_eq!(v["sponsored"]["status"], "yes");
         assert_eq!(v["sponsored"]["channel_id"], 123456789);
+        assert_eq!(v["sponsored"]["channel_title"], "Promo News");
         assert_eq!(v["subscription"]["checked"], true);
         assert_eq!(v["subscription"]["joined"], true);
     }

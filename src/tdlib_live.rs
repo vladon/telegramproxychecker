@@ -669,7 +669,7 @@ fn run_mtproto_sponsor_flow(
         pending.insert(ex);
     }
 
-    let mut found: Option<(i64, i64)> = None;
+    let mut found: Option<(i64, i64, Option<String>)> = None;
     while Instant::now() < deadline && !pending.is_empty() && found.is_none() {
         let Some(line) = receive_json_until(deadline, Duration::from_millis(500)) else {
             continue;
@@ -686,27 +686,27 @@ fn run_mtproto_sponsor_flow(
         }
         if json_type_name(&v) == Some("chat") && pending.remove(&ex) {
             if chat_positions_have_mtproto_proxy_source(&v) {
-                if let Some(pair) = sponsored_chat_ids_from_tdlib_chat(&v) {
-                    found = Some(pair);
+                if let Some(triple) = sponsored_info_from_tdlib_chat(&v) {
+                    found = Some(triple);
                 }
             }
         }
         if found.is_none() {
-            if let Some((disp, tid)) = sponsor_from_update_payload(&v) {
-                found = Some((disp, tid));
+            if let Some(triple) = sponsor_from_update_payload(&v) {
+                found = Some(triple);
                 break;
             }
         }
     }
 
-    let Some((display_id, tdlib_chat_id)) = found else {
+    let Some((display_id, tdlib_chat_id, channel_title)) = found else {
         if !pending.is_empty() {
             return (SponsoredReport::unknown_unchecked(), checked);
         }
         return (SponsoredReport::no_promo(), checked);
     };
 
-    let sponsored = SponsoredReport::yes_with_peer_id(display_id);
+    let sponsored = SponsoredReport::yes_with_peer(display_id, channel_title);
     let Some(user_id) = fetch_my_user_id(client_id, deadline) else {
         return (sponsored, checked);
     };
@@ -791,8 +791,8 @@ fn position_is_mtproto_proxy_source(pos: &Value) -> bool {
         .is_some_and(|s| s == "chatSourceMtprotoProxy")
 }
 
-/// TDLib `chat.type` supergroup_id for channels, and `chat.id` for getChatMember.
-fn sponsored_chat_ids_from_tdlib_chat(chat: &Value) -> Option<(i64, i64)> {
+/// TDLib `chat.type` supergroup_id for channels, `chat.id` for getChatMember, and optional `title`.
+fn sponsored_info_from_tdlib_chat(chat: &Value) -> Option<(i64, i64, Option<String>)> {
     let tdlib_chat_id = json_i64(chat.get("id")?)?;
     let t = chat.pointer("/type/@type")?.as_str()?;
     if t != "chatTypeSupergroup" {
@@ -803,24 +803,23 @@ fn sponsored_chat_ids_from_tdlib_chat(chat: &Value) -> Option<(i64, i64)> {
         return None;
     }
     let supergroup_id = json_i64(chat.pointer("/type/supergroup_id")?)?;
-    Some((supergroup_id, tdlib_chat_id))
+    let title = chat
+        .get("title")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Some((supergroup_id, tdlib_chat_id, title))
 }
 
-fn sponsor_from_update_payload(v: &Value) -> Option<(i64, i64)> {
+fn sponsor_from_update_payload(v: &Value) -> Option<(i64, i64, Option<String>)> {
     match json_type_name(v)? {
-        "updateNewChat" => {
+        "updateNewChat" | "updateChat" => {
             let chat = v.get("chat")?;
             if !chat_positions_have_mtproto_proxy_source(chat) {
                 return None;
             }
-            sponsored_chat_ids_from_tdlib_chat(chat)
-        }
-        "updateChat" => {
-            let chat = v.get("chat")?;
-            if !chat_positions_have_mtproto_proxy_source(chat) {
-                return None;
-            }
-            sponsored_chat_ids_from_tdlib_chat(chat)
+            sponsored_info_from_tdlib_chat(chat)
         }
         _ => None,
     }

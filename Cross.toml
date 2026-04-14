@@ -3,6 +3,7 @@
 [build.env]
 passthrough = [
     "TDLIB_BUILD_VARIANT",
+    "TDLIB_CMAKE_CACHE_ID",
     "TDLIB_LINK_SSL_STATIC",
     "OPENSSL_STATIC",
     "RUSTFLAGS",

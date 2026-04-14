@@ -5,13 +5,13 @@
 //!
 //! ## Isolated native builds per variant
 //!
-//! CMake output lives under **`$CARGO_TARGET_DIR/tdlib-build-cache/cmake/`** + pinned **`TD_COMMIT`** +
-//! **`TARGET`** + variant id (not under Cargo’s per-package `OUT_DIR`), so edits to `build.rs` /
-//! `Cargo.toml` / build-deps do not wipe the TDLib object tree. **gnu vs musl**, **v3 RUSTFLAGS**,
-//! and **static vs dynamic** still use separate subtrees. Set **`TDLIB_BUILD_VARIANT`** for each release
-//! matrix row (see `Makefile`). If unset, the id is `default`; if `default` but
-//! **`CARGO_ENCODED_RUSTFLAGS`** is non-empty, a short hash is appended so `-C target-cpu=x86-64-v3`
-//! does not collide with a generic CPU build.
+//! CMake output lives under **`$CARGO_TARGET_DIR/tdlib-build-cache/cmake/`** + **`TD_COMMIT`** +
+//! **`TARGET`** + **CMake profile** (not under Cargo’s per-package `OUT_DIR`). The profile matches what
+//! actually changes TDLib’s CMake step: **Windows / macOS / musl-shared / musl-static / other Unix
+//! static `.a` chain** — not **`RUSTFLAGS`** or arbitrary **`TDLIB_BUILD_VARIANT`** labels, so e.g.
+//! generic vs **x86-64-v3** GNU rows share one TDLib tree. Override with **`TDLIB_CMAKE_CACHE_ID`**
+//! if you need isolation. **`TDLIB_BUILD_VARIANT`** still controls musl static detection (name must
+//! contain **`musl-static`** or **`musl-v3-static`** for the static CMake path).
 //!
 //! Pinned tarball sources (when `third_party/td` is absent) unpack under
 //! **`$CARGO_TARGET_DIR/tdlib-build-cache/source/`** + **`TD_COMMIT`**, reused across builds.
@@ -59,7 +59,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TDLIB_LINK_SHARED");
     println!("cargo:rerun-if-env-changed=TDLIB_LINK_SSL_STATIC");
     println!("cargo:rerun-if-env-changed=TDLIB_BUILD_VARIANT");
-    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    println!("cargo:rerun-if-env-changed=TDLIB_CMAKE_CACHE_ID");
     println!("cargo:rerun-if-env-changed=CMAKE");
     println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
     println!("cargo:rerun-if-env-changed=CXX");
@@ -223,26 +223,53 @@ fn cargo_target_dir(manifest_dir: &Path) -> PathBuf {
         .unwrap_or_else(|_| manifest_dir.join("target"))
 }
 
-/// CMake/install trees per TD revision, target triple, and release variant (stable across Cargo `OUT_DIR`).
+/// CMake/install trees per TD revision, `TARGET`, and CMake/link profile (stable across Cargo `OUT_DIR`).
 fn td_artifact_root(manifest_dir: &Path) -> PathBuf {
-    let base = env::var("TDLIB_BUILD_VARIANT").unwrap_or_else(|_| "default".into());
-    let safe = sanitize_variant(&base);
-    let rf = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    let segment = if safe == "default" && !rf.is_empty() {
-        let h = Sha256::digest(rf.as_bytes());
-        let hex: String = h.iter().take(8).map(|b| format!("{b:02x}")).collect();
-        format!("default_{hex}")
-    } else {
-        safe
-    };
     let target_triple = env::var("TARGET").unwrap_or_default();
     let triple_key = sanitize_variant(&target_triple);
+    let segment = td_cmake_cache_segment();
     cargo_target_dir(manifest_dir)
         .join("tdlib-build-cache")
         .join("cmake")
         .join(TD_COMMIT)
         .join(triple_key)
         .join(segment)
+}
+
+/// Directory name under `.../cmake/<TD_COMMIT>/<TARGET>/` — only factors that change TDLib’s CMake config.
+fn td_cmake_cache_segment() -> String {
+    if let Ok(id) = env::var("TDLIB_CMAKE_CACHE_ID") {
+        let t = id.trim();
+        if !t.is_empty() {
+            return sanitize_variant(t);
+        }
+    }
+
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_triple = env::var("TARGET").unwrap_or_default();
+    let is_musl_target = target_env == "musl" || target_triple.contains("musl");
+    let msvc = target_env == "msvc";
+
+    let variant_raw = env::var("TDLIB_BUILD_VARIANT").unwrap_or_else(|_| "default".into());
+    let v = variant_raw.to_ascii_lowercase();
+    let musl_static_tdlib =
+        is_musl_target && (v.contains("musl-static") || v.contains("musl-v3-static"));
+
+    if target_os == "windows" || msvc {
+        "windows".into()
+    } else if target_os == "macos" {
+        "macos".into()
+    } else if is_musl_target {
+        if musl_static_tdlib {
+            "musl-static".into()
+        } else {
+            "musl-shared".into()
+        }
+    } else {
+        // glibc Linux, *BSD, etc.: same TDLib CMake output for the static `.a` link chain.
+        "unix-static".into()
+    }
 }
 
 fn sanitize_variant(s: &str) -> String {

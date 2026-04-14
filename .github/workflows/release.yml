@@ -60,29 +60,35 @@ jobs:
           - libc: gnu
             suffix: linux-x86_64-gnu
             tdlib_variant: gha-gnu
+            tdlib_cache_group: gnu
             rustflags: ""
           - libc: gnu
             suffix: linux-x86_64-gnu-v3
             tdlib_variant: gha-gnu-v3
+            tdlib_cache_group: gnu
             rustflags: "-C target-cpu=x86-64-v3"
           - libc: musl
             suffix: linux-x86_64-musl
             tdlib_variant: gha-musl
+            tdlib_cache_group: musl-shared
             rustflags: ""
             static: false
           - libc: musl
             suffix: linux-x86_64-musl-v3
             tdlib_variant: gha-musl-v3
+            tdlib_cache_group: musl-shared
             rustflags: "-C target-cpu=x86-64-v3"
             static: false
           - libc: musl
             suffix: linux-x86_64-musl-static
             tdlib_variant: gha-musl-static
+            tdlib_cache_group: musl-static
             rustflags: "-C target-feature=+crt-static"
             static: true
           - libc: musl
             suffix: linux-x86_64-musl-v3-static
             tdlib_variant: gha-musl-v3-static
+            tdlib_cache_group: musl-static
             rustflags: "-C target-feature=+crt-static -C target-cpu=x86-64-v3"
             static: true
     env:
@@ -115,9 +121,10 @@ jobs:
         name: Cache TDLib cmake + source
         with:
           path: target/tdlib-build-cache
-          key: tdlib-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('build.rs', 'rust-toolchain.toml', 'Cross.toml', 'docker/cross-musl.Dockerfile') }}
+          # Matches build.rs `td_cmake_cache_segment`: gnu ×2, musl shared ×2, musl static ×2 → 3 caches total.
+          key: tdlib-${{ runner.os }}-${{ matrix.tdlib_cache_group }}-${{ hashFiles('build.rs', 'rust-toolchain.toml', 'Cross.toml', 'docker/cross-musl.Dockerfile') }}
           restore-keys: |
-            tdlib-${{ runner.os }}-${{ matrix.suffix }}-
+            tdlib-${{ runner.os }}-${{ matrix.tdlib_cache_group }}-
 
       - name: Install dependencies (GNU)
         if: matrix.libc == 'gnu'

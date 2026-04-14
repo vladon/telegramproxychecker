@@ -75,66 +75,10 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
-
-      - uses: actions/cache@v4
-        name: Cache Cargo registry (shared)
+      - uses: ./.github/actions/release-build-env
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-${{ runner.os }}-
-
-      - uses: actions/cache@v4
-        name: Cache TDLib (warm prep)
-        with:
-          path: target/tdlib-build-cache
-          key: tdlib-${{ runner.os }}-${{ matrix.group }}-${{ hashFiles('build.rs', 'rust-toolchain.toml', 'Cross.toml', 'docker/cross-musl.Dockerfile') }}
-          restore-keys: |
-            tdlib-${{ runner.os }}-${{ matrix.group }}-
-
-      - name: Install dependencies (GNU)
-        if: matrix.libc == 'gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
-            libssl-dev zlib1g-dev libzstd-dev gperf
-
-      - name: Install host tools (musl)
-        if: matrix.libc == 'musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y patchelf
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.libc == 'gnu'
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.libc == 'musl'
-        with:
-          toolchain: 1.94.1
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install cross
-        if: matrix.libc == 'musl'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: Verify Cross.toml musl setup (dockerfile, not pre-build array)
-        if: matrix.libc == 'musl'
-        run: |
-          if grep -qE '^\s*pre-build\s*=' Cross.toml; then
-            echo "::error::Cross.toml must not use a pre-build array for musl (repo scripts are not in that image layer). Use docker/cross-musl.Dockerfile only."
-            exit 1
-          fi
-          test -f docker/cross-musl.Dockerfile
-          test -f scripts/cross-prebuild-musl.sh
-          grep -q 'docker/cross-musl.Dockerfile' Cross.toml
+          libc: ${{ matrix.libc }}
+          tdlib-cache-group: ${{ matrix.group }}
 
       - name: cargo build --release (GNU — drives TDLib once)
         if: matrix.libc == 'gnu'
@@ -214,30 +158,11 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
-
-      # TDLib lives under target/tdlib-build-cache/ (see build.rs). Do not rely on rust-cache alone:
-      # it prunes target/ and would drop the huge CMake tree.
-      - uses: actions/cache@v4
-        name: Cache Cargo registry (shared)
+      - uses: ./.github/actions/release-build-env
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-${{ runner.os }}-
-
-      - uses: actions/cache@v4
-        name: Cache TDLib cmake + source
-        with:
-          path: target/tdlib-build-cache
-          # Matches build.rs `td_cmake_cache_segment`: gnu ×2, musl shared ×2, musl static ×2 → 3 caches total.
-          key: tdlib-${{ runner.os }}-${{ matrix.tdlib_cache_group }}-${{ hashFiles('build.rs', 'rust-toolchain.toml', 'Cross.toml', 'docker/cross-musl.Dockerfile') }}
-          restore-keys: |
-            tdlib-${{ runner.os }}-${{ matrix.tdlib_cache_group }}-
+          libc: ${{ matrix.libc }}
+          tdlib-cache-group: ${{ matrix.tdlib_cache_group }}
+          run-toolchain: "false"
 
       # Overlay prep job output so two gnu (or two musl-*) rows never both compile TDLib in one run.
       - uses: actions/download-artifact@v7
@@ -246,44 +171,11 @@ jobs:
           name: tdlib-prep-${{ matrix.tdlib_cache_group }}
           path: target/tdlib-build-cache
 
-      - name: Install dependencies (GNU)
-        if: matrix.libc == 'gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
-            libssl-dev zlib1g-dev libzstd-dev gperf
-
-      - name: Install host tools (musl)
-        if: matrix.libc == 'musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y patchelf
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.libc == 'gnu'
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.libc == 'musl'
+      - uses: ./.github/actions/release-build-env
         with:
-          toolchain: 1.94.1
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install cross
-        if: matrix.libc == 'musl'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: Verify Cross.toml musl setup (dockerfile, not pre-build array)
-        if: matrix.libc == 'musl'
-        run: |
-          if grep -qE '^\s*pre-build\s*=' Cross.toml; then
-            echo "::error::Cross.toml must not use a pre-build array for musl (repo scripts are not in that image layer). Use docker/cross-musl.Dockerfile only."
-            exit 1
-          fi
-          test -f docker/cross-musl.Dockerfile
-          test -f scripts/cross-prebuild-musl.sh
-          grep -q 'docker/cross-musl.Dockerfile' Cross.toml
+          libc: ${{ matrix.libc }}
+          tdlib-cache-group: ${{ matrix.tdlib_cache_group }}
+          run-disk-and-caches: "false"
 
       - name: cargo build --release (GNU)
         if: matrix.libc == 'gnu'

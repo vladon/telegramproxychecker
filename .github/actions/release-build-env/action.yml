@@ -1,0 +1,91 @@
+# Shared Ubuntu + Rust + cross + caches for release.yml (prep-tdlib + build jobs).
+name: Release build environment
+description: Free disk, Cargo/TDLib caches, apt packages, Rust toolchain, cross, Cross.toml guard
+
+inputs:
+  libc:
+    description: gnu or musl
+    required: true
+  tdlib-cache-group:
+    description: TDLib actions/cache key segment (gnu, musl-shared, musl-static)
+    required: false
+    default: ""
+  run-disk-and-caches:
+    description: Run free-disk + registry + TDLib cache restore
+    required: false
+    default: "true"
+  run-toolchain:
+    description: Run apt, rust-toolchain, cross, Cross.toml verification
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      if: ${{ inputs.run-disk-and-caches == 'true' }}
+      shell: bash
+      run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
+
+    - uses: actions/cache@v4
+      if: ${{ inputs.run-disk-and-caches == 'true' }}
+      name: Cache Cargo registry (shared)
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+        key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-${{ runner.os }}-
+
+    - uses: actions/cache@v4
+      if: ${{ inputs.run-disk-and-caches == 'true' }}
+      name: Cache TDLib cmake + source
+      with:
+        path: target/tdlib-build-cache
+        key: tdlib-${{ runner.os }}-${{ inputs.tdlib-cache-group }}-${{ hashFiles('build.rs', 'rust-toolchain.toml', 'Cross.toml', 'docker/cross-musl.Dockerfile') }}
+        restore-keys: |
+          tdlib-${{ runner.os }}-${{ inputs.tdlib-cache-group }}-
+
+    - name: Install dependencies (GNU)
+      if: ${{ inputs.run-toolchain == 'true' && inputs.libc == 'gnu' }}
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+          libssl-dev zlib1g-dev libzstd-dev gperf
+
+    - name: Install host tools (musl)
+      if: ${{ inputs.run-toolchain == 'true' && inputs.libc == 'musl' }}
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y patchelf
+
+    - uses: dtolnay/rust-toolchain@stable
+      if: ${{ inputs.run-toolchain == 'true' && inputs.libc == 'gnu' }}
+
+    - uses: dtolnay/rust-toolchain@stable
+      if: ${{ inputs.run-toolchain == 'true' && inputs.libc == 'musl' }}
+      with:
+        toolchain: 1.94.1
+        targets: x86_64-unknown-linux-musl
+
+    - name: Install cross
+      if: ${{ inputs.run-toolchain == 'true' && inputs.libc == 'musl' }}
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cross
+
+    - name: Verify Cross.toml musl setup (dockerfile, not pre-build array)
+      if: ${{ inputs.run-toolchain == 'true' && inputs.libc == 'musl' }}
+      shell: bash
+      run: |
+        if grep -qE '^\s*pre-build\s*=' Cross.toml; then
+          echo "::error::Cross.toml must not use a pre-build array for musl (repo scripts are not in that image layer). Use docker/cross-musl.Dockerfile only."
+          exit 1
+        fi
+        test -f docker/cross-musl.Dockerfile
+        test -f scripts/cross-prebuild-musl.sh
+        grep -q 'docker/cross-musl.Dockerfile' Cross.toml

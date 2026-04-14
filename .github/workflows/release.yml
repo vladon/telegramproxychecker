@@ -17,6 +17,8 @@ concurrency:
 
 permissions:
   contents: read
+  # Allow saving/restoring workflow cache (TDLib cmake tree, Cargo registry).
+  actions: write
 
 jobs:
   validate-tag:
@@ -95,6 +97,27 @@ jobs:
 
       - name: Free disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
+
+      # TDLib lives under target/tdlib-build-cache/ (see build.rs). Do not rely on rust-cache alone:
+      # it prunes target/ and would drop the huge CMake tree.
+      - uses: actions/cache@v4
+        name: Cache Cargo registry (shared)
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - uses: actions/cache@v4
+        name: Cache TDLib cmake + source
+        with:
+          path: target/tdlib-build-cache
+          key: tdlib-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('build.rs', 'rust-toolchain.toml', 'Cross.toml', 'docker/cross-musl.Dockerfile') }}
+          restore-keys: |
+            tdlib-${{ runner.os }}-${{ matrix.suffix }}-
 
       - name: Install dependencies (GNU)
         if: matrix.libc == 'gnu'

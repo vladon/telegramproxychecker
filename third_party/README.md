@@ -13,6 +13,6 @@ cd third_party/td && git fetch --depth 1 origin 8ff05a0e7e064fa796593f3105c2dcf9
 
 ### Fallback (no submodule)
 
-If `third_party/td` is empty (only `.gitkeep`), `build.rs` downloads the same commit as a **GitHub archive** into `target/*/build/.../out/td-src/`, verifies SHA-256, and builds from there. This requires `curl` or `wget` and network access on the first build.
+If `third_party/td` is empty (only `.gitkeep`), `build.rs` downloads the same commit as a **GitHub archive** into **`target/tdlib-build-cache/source/<commit>/`**, verifies SHA-256, and builds from there. This requires `curl` or `wget` and network access on the first build.
 
 The pinned revision exposes the multiplex JSON API: `td_create_client_id`, `td_send`, `td_receive`.

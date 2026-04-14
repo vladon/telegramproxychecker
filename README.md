@@ -103,16 +103,16 @@ TDLib is **vendored and built by Cargo**. You do **not** clone TDLib separately,
 ### Source tree
 
 - **Normal / reproducible path:** check out TDLib under **`third_party/td`** at the pinned commit (see [`third_party/README.md`](third_party/README.md)). `build.rs` runs CMake against that directory.
-- **Bootstrap path:** if `third_party/td` has no `CMakeLists.txt`, `build.rs` downloads the **same** pinned commit as a tarball into `target/<triplet>/<profile>/build/tg-proxy-check-*/out/td-src/`, verifies SHA-256, then builds. That needs `curl` or `wget` once.
+- **Bootstrap path:** if `third_party/td` has no `CMakeLists.txt`, `build.rs` downloads the **same** pinned commit as a tarball into **`target/tdlib-build-cache/source/<TD_COMMIT>/`** (or `$CARGO_TARGET_DIR/tdlib-build-cache/...` if set), verifies SHA-256, then builds. That needs `curl` or `wget` once.
 
-Pinned revision: **upstream `master` snapshot** (commit `8ff05a0e7e064fa796593f3105c2dcf983e279d4`), defined as `TD_COMMIT` in `build.rs`. After bumping TDLib, run **`cargo clean`** once so CMake does not reuse an old `td-artifacts` tree.
+Pinned revision: **upstream `master` snapshot** (commit `8ff05a0e7e064fa796593f3105c2dcf983e279d4`), defined as `TD_COMMIT` in `build.rs`. After bumping TDLib, remove the old cache under **`target/tdlib-build-cache/cmake/<old-commit>/`** (or run **`cargo clean`**); the new commit uses a separate subtree automatically.
 
 ### Where native artifacts go
 
-| Stage | Location (under `target/.../build/tg-proxy-check-<hash>/out/`) |
+| Stage | Location (under **`target/`** or **`$CARGO_TARGET_DIR`**) |
 |--------|------------------------------------------------------------------|
-| Per-variant CMake + install | `td-artifacts/<variant-id>/tdlib-cmake/` and `td-artifacts/<variant-id>/tdlib-install/lib/` |
-| Tarball extract (if used) | `td-src/td-<commit>/` (shared source; only **build trees** are per-variant) |
+| Per-target, per-variant CMake + install | `tdlib-build-cache/cmake/<TD_COMMIT>/<Rust TARGET>/<variant-id>/tdlib-cmake/` and `.../tdlib-install/lib/` |
+| Tarball extract (if used) | `tdlib-build-cache/source/<TD_COMMIT>/td-<commit>/` (shared across profiles; **build trees** stay per target + variant) |
 
 Set **`TDLIB_BUILD_VARIANT`** to a unique label for each release row (see [Release build matrix](#release-build-matrix-linux-x86_64)) so **gnu vs musl**, **generic vs x86-64-v3**, and **static vs shared tdjson** never reuse the same CMake output. If `TDLIB_BUILD_VARIANT` is unset, the id is `default`. If it is `default` but **`CARGO_ENCODED_RUSTFLAGS`** is non-empty (e.g. `-C target-cpu=x86-64-v3`), the directory name includes a short hash so two builds on the same target triple do not collide.
 
@@ -173,7 +173,7 @@ Use a **`third_party/td`** submodule to avoid network fetch during builds.
 cargo build --release
 ```
 
-The first build compiles TDLib and can take **several minutes** and several GB under `target/`. Later `cargo build` runs are incremental (CMake + Ninja/Make reuse the tree under `out/td-artifacts/<variant>/tdlib-cmake/build` until the source path, **`TDLIB_BUILD_VARIANT`**, or relevant env vars change).
+The first build compiles TDLib and can take **several minutes** and several GB under `target/`. Later `cargo build` runs are incremental: CMake + Ninja/Make reuse **`target/tdlib-build-cache/cmake/...`** even when Cargo’s `build/tg-proxy-check-*` hash changes, until TDLib sources, **`TDLIB_BUILD_VARIANT`**, **`TARGET`**, or relevant env vars change.
 
 ### Release build matrix (Linux x86_64)
 
@@ -285,13 +285,13 @@ Install **CMake**, a C++ toolchain (**Visual Studio Build Tools** with C++ workl
 | **zlib not found** | Install zlib development package (`zlib1g-dev`, etc.). |
 | **Download / network error** | Add **`third_party/td`** at the pinned commit (`third_party/README.md`) so no download runs. |
 | **Wrong generator on Windows** | Set **`CMAKE_GENERATOR`** (e.g. `Ninja` or a Visual Studio generator) if auto-detection fails. |
-| **CMake “home dir change” / weird cache** | `cargo clean -p tg-proxy-check` (or full `cargo clean`) and rebuild. |
+| **CMake “home dir change” / weird cache** | Remove **`target/tdlib-build-cache/cmake/...`** for the affected commit/target/variant, or full **`cargo clean`**, then rebuild. |
 
 ### Runtime loader issues (shared `tdjson` only)
 
 Applies to **Windows**, **Linux musl**, **`TDLIB_LINK_SHARED=1`**, or any path where the **shared** `tdjson` library is linked:
 
-- **Linux:** **rpath** points at `…/out/tdlib-install/lib`. If you move the binary without that tree, set **`LD_LIBRARY_PATH`** to that `lib` directory or copy **`libtdjson.so`** (and compatible OpenSSL/zlib) next to the binary.
+- **Linux:** **rpath** points at `…/tdlib-build-cache/cmake/.../tdlib-install/lib` (or the legacy `…/build/.../out/.../tdlib-install/lib`). If you move the binary without that tree, set **`LD_LIBRARY_PATH`** to that `lib` directory or copy **`libtdjson.so`** (and compatible OpenSSL/zlib) next to the binary.
 - **macOS (shared mode):** Same idea with **`libtdjson.dylib`** and **`DYLD_LIBRARY_PATH`** / install names if you relocate the binary.
 - **Windows:** **`tdjson.dll`** is copied to **`target/<profile>/`** during build; for distribution, keep **`tdjson.dll`** beside **`tg-proxy-check.exe`**.
 
@@ -308,6 +308,6 @@ cargo clippy --all-targets -- -D warnings
 
 ## Design note (FFI)
 
-- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → `OUT_DIR/td-artifacts/<variant>/tdlib-install`). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles **`addProxy`** / **`pingProxy`** with nested **`proxy`** objects plus authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
+- **Approach:** `build.rs` drives **TDLib** with the **`cmake`** crate (`install` target → **`target/tdlib-build-cache/cmake/.../tdlib-install`**). Low-level **tdjson** C calls live in `src/tdjson_sys.rs`; `src/tdlib_live.rs` (behind the `tdlib` feature) handles **`addProxy`** / **`pingProxy`** with nested **`proxy`** objects plus authorization. Link metadata is emitted from `build.rs` only—no system `libtdjson` discovery.
 - **Pinned version:** See `TD_COMMIT` / `TD_TARBALL_SHA256` in `build.rs` and [`third_party/README.md`](third_party/README.md); bump them together when upgrading. Telegram may return **`UPDATE_APP_TO_LOGIN`** for very old layers—rebuild against a current pin if login or `pingProxy` fails with that code.
 - **Caveats:** All `td_receive` calls run on **one thread**; the pointer returned by `td_receive` is only valid until the next `td_receive` / `td_execute` on that thread—this implementation copies the string immediately. Temporary TDLib database directories are created under the system temp folder per run. Every exit path after `td_create_client_id` runs `close` and clears the log callback so the next probe in-process does not inherit state. Timeouts carry a `ProbeTimeoutContext` so verbose output still shows elapsed time and authorization states reached.

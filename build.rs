@@ -5,13 +5,18 @@
 //!
 //! ## Isolated native builds per variant
 //!
-//! CMake output lives under `OUT_DIR/td-artifacts/<variant-id>/` so **gnu vs musl**, **v3 RUSTFLAGS**,
-//! and **static vs dynamic** never reuse the same object tree. Set **`TDLIB_BUILD_VARIANT`** for each
-//! release matrix row (see `Makefile`). If unset, the id is `default`; if `default` but
+//! CMake output lives under **`$CARGO_TARGET_DIR/tdlib-build-cache/cmake/`** + pinned **`TD_COMMIT`** +
+//! **`TARGET`** + variant id (not under Cargo’s per-package `OUT_DIR`), so edits to `build.rs` /
+//! `Cargo.toml` / build-deps do not wipe the TDLib object tree. **gnu vs musl**, **v3 RUSTFLAGS**,
+//! and **static vs dynamic** still use separate subtrees. Set **`TDLIB_BUILD_VARIANT`** for each release
+//! matrix row (see `Makefile`). If unset, the id is `default`; if `default` but
 //! **`CARGO_ENCODED_RUSTFLAGS`** is non-empty, a short hash is appended so `-C target-cpu=x86-64-v3`
-//! does not collide with a generic CPU build sharing the same Cargo `OUT_DIR`.
+//! does not collide with a generic CPU build.
 //!
-//! Linking (artifacts under `td-artifacts/.../tdlib-install/lib`, never `/usr/lib`):
+//! Pinned tarball sources (when `third_party/td` is absent) unpack under
+//! **`$CARGO_TARGET_DIR/tdlib-build-cache/source/`** + **`TD_COMMIT`**, reused across builds.
+//!
+//! Linking (artifacts under `tdlib-build-cache/.../tdlib-install/lib`, never `/usr/lib`):
 //! - **Linux GNU / macOS:** static `.a` TDLib chain + system crypto/zlib (+ optional zstd) + C++ runtime.
 //! - **Linux musl (normal):** locally built **`libtdjson.so`** + rpath (avoids libstdc++/glibc static pain).
 //! - **Linux musl + variant `*musl-static*`:** static TDLib `.a` chain; optional **`TDLIB_LINK_SSL_STATIC=1`**
@@ -59,21 +64,21 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
     println!("cargo:rerun-if-env-changed=CXX");
     println!("cargo:rerun-if-env-changed=RUSTC");
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
 
     if env::var("CARGO_FEATURE_TDLIB").is_err() {
         return;
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
-    let td_src = resolve_td_source(&manifest_dir, &out_dir);
+    let td_src = resolve_td_source(&manifest_dir);
     println!(
         "cargo:rerun-if-changed={}",
         td_src.join("CMakeLists.txt").display()
     );
 
-    let artifact_root = td_artifact_root(&out_dir);
+    let artifact_root = td_artifact_root(&manifest_dir);
     fs::create_dir_all(&artifact_root).expect("create td artifact root");
 
     let install_dir = artifact_root.join("tdlib-install");
@@ -212,8 +217,14 @@ fn main() {
     }
 }
 
-/// Separate CMake/install trees per release variant (and per distinct RUSTFLAGS when variant is default).
-fn td_artifact_root(out_dir: &Path) -> PathBuf {
+fn cargo_target_dir(manifest_dir: &Path) -> PathBuf {
+    env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| manifest_dir.join("target"))
+}
+
+/// CMake/install trees per TD revision, target triple, and release variant (stable across Cargo `OUT_DIR`).
+fn td_artifact_root(manifest_dir: &Path) -> PathBuf {
     let base = env::var("TDLIB_BUILD_VARIANT").unwrap_or_else(|_| "default".into());
     let safe = sanitize_variant(&base);
     let rf = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
@@ -224,7 +235,14 @@ fn td_artifact_root(out_dir: &Path) -> PathBuf {
     } else {
         safe
     };
-    out_dir.join("td-artifacts").join(segment)
+    let target_triple = env::var("TARGET").unwrap_or_default();
+    let triple_key = sanitize_variant(&target_triple);
+    cargo_target_dir(manifest_dir)
+        .join("tdlib-build-cache")
+        .join("cmake")
+        .join(TD_COMMIT)
+        .join(triple_key)
+        .join(segment)
 }
 
 fn sanitize_variant(s: &str) -> String {
@@ -247,13 +265,16 @@ fn ssl_static_enabled() -> bool {
     env::var("TDLIB_LINK_SSL_STATIC").as_deref() == Ok("1")
 }
 
-fn resolve_td_source(manifest_dir: &Path, out_dir: &Path) -> PathBuf {
+fn resolve_td_source(manifest_dir: &Path) -> PathBuf {
     let submodule = manifest_dir.join("third_party/td/CMakeLists.txt");
     if submodule.is_file() {
         return manifest_dir.join("third_party/td");
     }
 
-    let extract_root = out_dir.join("td-src");
+    let extract_root = cargo_target_dir(manifest_dir)
+        .join("tdlib-build-cache")
+        .join("source")
+        .join(TD_COMMIT);
     let stamp = extract_root.join(format!(".td-extracted-{TD_COMMIT}"));
     if stamp.is_file() {
         let inner = fs::read_to_string(&stamp).expect("read stamp");
@@ -266,7 +287,7 @@ fn resolve_td_source(manifest_dir: &Path, out_dir: &Path) -> PathBuf {
     let _ = fs::remove_dir_all(&extract_root);
     fs::create_dir_all(&extract_root).expect("mkdir extract");
 
-    let tarball = out_dir.join(format!("td-{TD_COMMIT}.tar.gz"));
+    let tarball = extract_root.join(format!("td-{TD_COMMIT}.tar.gz"));
     let url = format!("https://github.com/tdlib/td/archive/{TD_COMMIT}.tar.gz");
     download_file(&url, &tarball);
     verify_tarball(&tarball);

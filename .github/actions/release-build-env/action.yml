@@ -27,7 +27,7 @@ runs:
       shell: bash
       run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
 
-    - uses: actions/cache@v4
+    - uses: actions/cache@v5
       if: ${{ inputs.run-disk-and-caches == 'true' }}
       name: Cache Cargo registry (shared)
       with:
@@ -39,7 +39,7 @@ runs:
         restore-keys: |
           cargo-registry-${{ runner.os }}-
 
-    - uses: actions/cache@v4
+    - uses: actions/cache@v5
       if: ${{ inputs.run-disk-and-caches == 'true' }}
       name: Cache TDLib cmake + source
       with:

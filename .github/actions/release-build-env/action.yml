@@ -7,7 +7,7 @@ inputs:
     description: gnu or musl
     required: true
   tdlib-cache-group:
-    description: TDLib actions/cache key segment (gnu, musl-shared, musl-static)
+    description: TDLib actions/cache key segment (gnu, musl-static)
     required: false
     default: ""
   run-disk-and-caches:
@@ -55,13 +55,6 @@ runs:
         sudo apt-get update
         sudo apt-get install -y build-essential cmake ninja-build pkg-config \
           libssl-dev zlib1g-dev libzstd-dev gperf
-
-    - name: Install host tools (musl)
-      if: ${{ inputs.run-toolchain == 'true' && inputs.libc == 'musl' }}
-      shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y patchelf
 
     - uses: dtolnay/rust-toolchain@stable
       if: ${{ inputs.run-toolchain == 'true' && inputs.libc == 'gnu' }}

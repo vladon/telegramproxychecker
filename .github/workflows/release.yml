@@ -47,8 +47,8 @@ jobs:
           fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
-  # One TDLib compile per profile per workflow: artifacts are reused by all matrix rows that share
-  # tdlib_cache_group (gnu×2, musl-shared×2, musl-static×2). Artifacts are large (multi‑GB); short retention.
+  # One TDLib compile per profile per workflow: artifacts are reused by matrix rows that share
+  # tdlib_cache_group (gnu×2, musl-static×2). Artifacts are large (multi‑GB); short retention.
   prep-tdlib:
     name: Prep TDLib (${{ matrix.group }})
     needs: validate-tag
@@ -60,9 +60,6 @@ jobs:
         include:
           - group: gnu
             libc: gnu
-          - group: musl-shared
-            libc: musl
-            static: false
           - group: musl-static
             libc: musl
             static: true
@@ -89,7 +86,7 @@ jobs:
       - name: cross build --release (musl — drives TDLib once)
         if: matrix.libc == 'musl'
         env:
-          TDLIB_BUILD_VARIANT: ${{ matrix.group == 'musl-static' && 'gha-musl-static' || 'gha-musl' }}
+          TDLIB_BUILD_VARIANT: gha-musl-static
         run: |
           if [ "${{ matrix.static }}" = "true" ]; then
             export OPENSSL_STATIC=1
@@ -125,18 +122,6 @@ jobs:
             tdlib_cache_group: gnu
             rustflags: "-C target-cpu=x86-64-v3"
           - libc: musl
-            suffix: linux-x86_64-musl
-            tdlib_variant: gha-musl
-            tdlib_cache_group: musl-shared
-            rustflags: ""
-            static: false
-          - libc: musl
-            suffix: linux-x86_64-musl-v3
-            tdlib_variant: gha-musl-v3
-            tdlib_cache_group: musl-shared
-            rustflags: "-C target-cpu=x86-64-v3"
-            static: false
-          - libc: musl
             suffix: linux-x86_64-musl-static
             tdlib_variant: gha-musl-static
             tdlib_cache_group: musl-static
@@ -164,7 +149,7 @@ jobs:
           tdlib-cache-group: ${{ matrix.tdlib_cache_group }}
           run-toolchain: "false"
 
-      # Overlay prep job output so two gnu (or two musl-*) rows never both compile TDLib in one run.
+      # Overlay prep job output so two gnu or two musl-static rows never both compile TDLib in one run.
       - uses: actions/download-artifact@v7
         name: TDLib from prep job
         with:
@@ -196,17 +181,11 @@ jobs:
           fi
           cross build --release --target x86_64-unknown-linux-musl
 
-      - name: Patchelf (shared tdjson) / verify static
+      - name: Verify static musl binary
         if: matrix.libc == 'musl'
         run: |
-          chmod +x scripts/find-libtdjson.sh scripts/package-release-artifact.sh scripts/verify-fully-static.sh
-          BIN="$MUSL_TARGET_DIR/tg-proxy-check"
-          if [ "${{ matrix.static }}" = "true" ]; then
-            scripts/verify-fully-static.sh "$BIN"
-          else
-            TDJSON="$(scripts/find-libtdjson.sh "$MUSL_TARGET_DIR")"
-            patchelf --set-rpath '$ORIGIN' "$BIN"
-          fi
+          chmod +x scripts/verify-fully-static.sh
+          scripts/verify-fully-static.sh "$MUSL_TARGET_DIR/tg-proxy-check"
 
       - name: Package (GNU)
         if: matrix.libc == 'gnu'
@@ -225,12 +204,7 @@ jobs:
           chmod +x scripts/package-release-artifact.sh
           NAME="tg-proxy-check-${VERSION}-${{ matrix.suffix }}"
           BIN="$MUSL_TARGET_DIR/tg-proxy-check"
-          if [ "${{ matrix.static }}" = "true" ]; then
-            scripts/package-release-artifact.sh dist "$NAME" "$BIN"
-          else
-            TDJSON="$(scripts/find-libtdjson.sh "$MUSL_TARGET_DIR")"
-            scripts/package-release-artifact.sh dist "$NAME" "$BIN" "$TDJSON"
-          fi
+          scripts/package-release-artifact.sh dist "$NAME" "$BIN"
 
       - uses: actions/upload-artifact@v6
         with:

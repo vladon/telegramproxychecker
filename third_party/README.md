@@ -2,7 +2,7 @@
 
 ## TDLib (`td/`)
 
-**Expected layout:** `third_party/td` should contain a checkout of [TDLib](https://github.com/tdlib/td) at the **pinned commit** in `build.rs` (`TD_COMMIT`). CMake always runs against this directory when `third_party/td/CMakeLists.txt` is present.
+**Expected layout:** `third_party/td` should contain a checkout of [TDLib](https://github.com/tdlib/td) at the **pinned commit** in `build.rs` (`TD_COMMIT`). When bumping the pin, update **`ci/tdlib-build-fingerprint`** in the repo root to the same full hash (CI enforces a match). CMake always runs against this directory when `third_party/td/CMakeLists.txt` is present.
 
 ### Recommended: git submodule
 

@@ -1,0 +1,86 @@
+# Build target/tdlib-build-cache once per profile and upload to GitHub Release tag `tdlib-prebuilt`.
+# Release prep jobs download these archives to skip compiling TDLib when the pin matches.
+# Run manually after bumping TD_COMMIT in build.rs (and ci/tdlib-build-fingerprint).
+name: Publish TDLib prebuilts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tdlib-prebuilt
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Pack ${{ matrix.group }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: gnu
+            libc: gnu
+          - group: musl-static
+            libc: musl
+            static: true
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Scripts executable
+        run: chmod +x scripts/tdlib-cmake-install-ready.sh
+
+      - uses: ./.github/actions/release-build-env
+        with:
+          libc: ${{ matrix.libc }}
+          tdlib-cache-group: ${{ matrix.group }}
+
+      - name: cargo build --release (GNU)
+        if: matrix.libc == 'gnu'
+        env:
+          TDLIB_BUILD_VARIANT: gha-gnu
+        run: cargo build --release
+
+      - name: cross build --release (musl static)
+        if: matrix.libc == 'musl'
+        env:
+          TDLIB_BUILD_VARIANT: gha-musl-static
+        run: |
+          export OPENSSL_STATIC=1
+          export TDLIB_LINK_SSL_STATIC=1
+          cross build --release --target x86_64-unknown-linux-musl
+
+      - name: Pack tdlib-build-cache
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/tdlib-cmake-install-ready.sh "${{ matrix.group }}"
+          TD=$(sed -n 's/^const TD_COMMIT: &str = "\(.*\)".*/\1/p' build.rs | head -1)
+          echo "td=${TD}" >> "$GITHUB_OUTPUT"
+          OUT="tdlib-${{ matrix.group }}-${TD}.tar.zst"
+          tar -I 'zstd -10' -cf "$OUT" -C target tdlib-build-cache
+          ls -la "$OUT"
+
+      - name: Upload to release tdlib-prebuilt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TD="${{ steps.pack.outputs.td }}"
+          ASSET="tdlib-${{ matrix.group }}-${TD}.tar.zst"
+          if ! gh release view tdlib-prebuilt --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create tdlib-prebuilt --repo "${{ github.repository }}" \
+              --title "TDLib CI prebuilds" \
+              --notes "Pre-built target/tdlib-build-cache for Release CI. Re-run this workflow after changing TD_COMMIT (and ci/tdlib-build-fingerprint)." || true
+          fi
+          gh release upload tdlib-prebuilt "$ASSET" --repo "${{ github.repository }}" --clobber

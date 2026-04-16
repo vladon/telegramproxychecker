@@ -20,6 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: ci/tdlib-build-fingerprint matches build.rs TD_COMMIT
+        run: |
+          set -euo pipefail
+          a=$(sed -n 's/^const TD_COMMIT: &str = "\(.*\)".*/\1/p' build.rs | head -1)
+          b=$(tr -d '[:space:]' < ci/tdlib-build-fingerprint)
+          test "$a" = "$b"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.1

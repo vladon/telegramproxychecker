@@ -47,8 +47,9 @@ jobs:
           fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
-  # One TDLib compile per profile per workflow: artifacts are reused by matrix rows that share
-  # tdlib_cache_group (gnu×2, musl-static×2). Artifacts are large (multi‑GB); short retention.
+  # TDLib: optional download from GitHub Release `tdlib-prebuilt` (see tdlib-prebuilt.yml), then
+  # actions/cache, then compile only if the install tree is still missing. Prep artifacts are reused
+  # by matrix rows sharing tdlib_cache_group (gnu×2, musl-static×2). Short retention.
   prep-tdlib:
     name: Prep TDLib (${{ matrix.group }})
     needs: validate-tag
@@ -72,19 +73,43 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Scripts executable
+        run: chmod +x scripts/tdlib-cmake-install-ready.sh scripts/fetch-tdlib-prebuilt.sh
+
+      - name: TDLib commit (build.rs)
+        id: td_pin
+        shell: bash
+        run: |
+          echo "commit=$(sed -n 's/^const TD_COMMIT: &str = "\(.*\)".*/\1/p' build.rs | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Try TDLib prebuilt from release tdlib-prebuilt
+        id: prebuilt
+        shell: bash
+        run: scripts/fetch-tdlib-prebuilt.sh "${{ github.repository }}" "${{ matrix.group }}" "${{ steps.td_pin.outputs.commit }}"
+
       - uses: ./.github/actions/release-build-env
         with:
           libc: ${{ matrix.libc }}
           tdlib-cache-group: ${{ matrix.group }}
 
+      - name: TDLib install tree ready?
+        id: tdlib_ready
+        shell: bash
+        run: |
+          if scripts/tdlib-cmake-install-ready.sh "${{ matrix.group }}"; then
+            echo "need=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: cargo build --release (GNU — drives TDLib once)
-        if: matrix.libc == 'gnu'
+        if: matrix.libc == 'gnu' && steps.tdlib_ready.outputs.need == 'true'
         env:
           TDLIB_BUILD_VARIANT: gha-gnu
         run: cargo build --release
 
       - name: cross build --release (musl — drives TDLib once)
-        if: matrix.libc == 'musl'
+        if: matrix.libc == 'musl' && steps.tdlib_ready.outputs.need == 'true'
         env:
           TDLIB_BUILD_VARIANT: gha-musl-static
         run: |

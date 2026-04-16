@@ -27,6 +27,9 @@ runs:
       shell: bash
       run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android || true
 
+    # TDLib cache key uses ci/tdlib-build-fingerprint (TD pin only) plus cross/rust inputs — not
+    # the whole build.rs, so unrelated edits do not invalidate the CMake tree. Bump that file when
+    # changing TD_COMMIT in build.rs (same value as the const).
     - uses: actions/cache@v5
       if: ${{ inputs.run-disk-and-caches == 'true' }}
       name: Cache Cargo registry (shared)
@@ -40,11 +43,11 @@ runs:
           cargo-registry-${{ runner.os }}-
 
     - uses: actions/cache@v5
-      if: ${{ inputs.run-disk-and-caches == 'true' }}
+      if: ${{ inputs.run-disk-and-caches == 'true' && inputs.tdlib-cache-group != '' }}
       name: Cache TDLib cmake + source
       with:
         path: target/tdlib-build-cache
-        key: tdlib-${{ runner.os }}-${{ inputs.tdlib-cache-group }}-${{ hashFiles('build.rs', 'rust-toolchain.toml', 'Cross.toml', 'docker/cross-musl.Dockerfile') }}
+        key: tdlib-${{ runner.os }}-${{ inputs.tdlib-cache-group }}-${{ hashFiles('ci/tdlib-build-fingerprint', 'rust-toolchain.toml', 'Cross.toml', 'docker/cross-musl.Dockerfile') }}
         restore-keys: |
           tdlib-${{ runner.os }}-${{ inputs.tdlib-cache-group }}-
 
